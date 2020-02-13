@@ -1,0 +1,3440 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1990" onload="init(evt)" viewBox="0 0 1200 1990" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1990.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="1973" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1973" > </text>
+<g id="frames">
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM-IN-DIST (T QL-DIST:DIST)) (7 samples, 0.26%)</title><rect x="778.2" y="277" width="3.1" height="15.0" fill="rgb(215,138,52)" rx="2" ry="2" />
+<text  x="781.16" y="287.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (891 samples, 33.55%)</title><rect x="405.0" y="1605" width="395.8" height="15.0" fill="rgb(244,29,49)" rx="2" ry="2" />
+<text  x="407.96" y="1615.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION)</text>
+</g>
+<g >
+<title>COMPUTE-CONSTANTS (43 samples, 1.62%)</title><rect x="1058.9" y="1253" width="19.1" height="15.0" fill="rgb(236,83,49)" rx="2" ry="2" />
+<text  x="1061.94" y="1263.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (1 samples, 0.04%)</title><rect x="866.6" y="1317" width="0.4" height="15.0" fill="rgb(249,21,31)" rx="2" ry="2" />
+<text  x="869.57" y="1327.5" ></text>
+</g>
+<g >
+<title>RESOLVE-DEPENDENCY-NAME (28 samples, 1.05%)</title><rect x="705.3" y="853" width="12.4" height="15.0" fill="rgb(240,190,46)" rx="2" ry="2" />
+<text  x="708.29" y="863.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="1158.0" y="1413" width="1.3" height="15.0" fill="rgb(253,151,10)" rx="2" ry="2" />
+<text  x="1161.01" y="1423.5" ></text>
+</g>
+<g >
+<title>COMPILE-IN-LEXENV (26 samples, 0.98%)</title><rect x="1178.4" y="1157" width="11.6" height="15.0" fill="rgb(240,37,6)" rx="2" ry="2" />
+<text  x="1181.45" y="1167.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="799.9" y="149" width="0.9" height="15.0" fill="rgb(224,24,41)" rx="2" ry="2" />
+<text  x="802.92" y="159.5" ></text>
+</g>
+<g >
+<title>COMPILER (69 samples, 2.60%)</title><rect x="1000.3" y="1253" width="30.6" height="15.0" fill="rgb(216,149,27)" rx="2" ry="2" />
+<text  x="1003.29" y="1263.5" >CO..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS :AROUND (T T)) (16 samples, 0.60%)</title><rect x="710.6" y="661" width="7.1" height="15.0" fill="rgb(239,148,30)" rx="2" ry="2" />
+<text  x="713.62" y="671.5" ></text>
+</g>
+<g >
+<title>%WITH-STANDARD-IO-SYNTAX (12 samples, 0.45%)</title><rect x="712.4" y="597" width="5.3" height="15.0" fill="rgb(242,33,0)" rx="2" ry="2" />
+<text  x="715.40" y="607.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (50 samples, 1.88%)</title><rect x="1167.8" y="1541" width="22.2" height="15.0" fill="rgb(220,44,29)" rx="2" ry="2" />
+<text  x="1170.79" y="1551.5" >(..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PARSE-DEFSYSTEM:REGISTER-SYSTEM-DEFINITION) (8 samples, 0.30%)</title><rect x="592.9" y="773" width="3.5" height="15.0" fill="rgb(211,223,16)" rx="2" ry="2" />
+<text  x="595.89" y="783.5" ></text>
+</g>
+<g >
+<title>COMPILER (12 samples, 0.45%)</title><rect x="1050.9" y="1093" width="5.4" height="15.0" fill="rgb(225,107,0)" rx="2" ry="2" />
+<text  x="1053.94" y="1103.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM (ASDF/LISP-ACTION:LOAD-OP ASDF/OPERATE:REQUIRE-SYSTEM)) (15 samples, 0.56%)</title><rect x="860.3" y="1541" width="6.7" height="15.0" fill="rgb(246,228,18)" rx="2" ry="2" />
+<text  x="863.35" y="1551.5" ></text>
+</g>
+<g >
+<title>EXPORT (11 samples, 0.41%)</title><rect x="1032.7" y="1381" width="4.9" height="15.0" fill="rgb(212,206,41)" rx="2" ry="2" />
+<text  x="1035.73" y="1391.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST::ENSURE-SYSTEM-INDEX-FILE (QL-DIST:DIST)) (6 samples, 0.23%)</title><rect x="1156.7" y="1461" width="2.6" height="15.0" fill="rgb(221,57,53)" rx="2" ry="2" />
+<text  x="1159.68" y="1471.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::NEXT :IN SB-FASL::MAYBE-SKIP-SHEBANG-LINE) (5 samples, 0.19%)</title><rect x="1127.8" y="1445" width="2.2" height="15.0" fill="rgb(217,40,19)" rx="2" ry="2" />
+<text  x="1130.80" y="1455.5" ></text>
+</g>
+<g >
+<title>COMPILER (10 samples, 0.38%)</title><rect x="1073.6" y="709" width="4.4" height="15.0" fill="rgb(247,73,22)" rx="2" ry="2" />
+<text  x="1076.60" y="719.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD MAKE-INSTANCE (CLASS)) (1 samples, 0.04%)</title><rect x="1091.4" y="1237" width="0.4" height="15.0" fill="rgb(240,21,24)" rx="2" ry="2" />
+<text  x="1094.37" y="1247.5" ></text>
+</g>
+<g >
+<title>COMPILE-COMPONENT (8 samples, 0.30%)</title><rect x="1074.5" y="661" width="3.5" height="15.0" fill="rgb(242,175,24)" rx="2" ry="2" />
+<text  x="1077.49" y="671.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="680.0" y="661" width="1.7" height="15.0" fill="rgb(223,17,19)" rx="2" ry="2" />
+<text  x="682.97" y="671.5" ></text>
+</g>
+<g >
+<title>OPEN (4 samples, 0.15%)</title><rect x="600.0" y="917" width="1.8" height="15.0" fill="rgb(205,222,21)" rx="2" ry="2" />
+<text  x="603.00" y="927.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (4 samples, 0.15%)</title><rect x="1115.8" y="1349" width="1.8" height="15.0" fill="rgb(245,219,54)" rx="2" ry="2" />
+<text  x="1118.81" y="1359.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (34 samples, 1.28%)</title><rect x="785.7" y="389" width="15.1" height="15.0" fill="rgb(238,31,24)" rx="2" ry="2" />
+<text  x="788.71" y="399.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (1 samples, 0.04%)</title><rect x="995.9" y="1253" width="0.4" height="15.0" fill="rgb(241,106,39)" rx="2" ry="2" />
+<text  x="998.85" y="1263.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (75 samples, 2.82%)</title><rect x="997.6" y="1365" width="33.3" height="15.0" fill="rgb(238,228,17)" rx="2" ry="2" />
+<text  x="1000.63" y="1375.5" >CA..</text>
+</g>
+<g >
+<title>LOAD (9 samples, 0.34%)</title><rect x="770.6" y="165" width="4.0" height="15.0" fill="rgb(234,117,32)" rx="2" ry="2" />
+<text  x="773.60" y="175.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="568.5" y="917" width="1.7" height="15.0" fill="rgb(236,170,37)" rx="2" ry="2" />
+<text  x="571.46" y="927.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS :AROUND (T T)) (16 samples, 0.60%)</title><rect x="767.5" y="277" width="7.1" height="15.0" fill="rgb(211,197,41)" rx="2" ry="2" />
+<text  x="770.49" y="287.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="919.0" y="1381" width="0.9" height="15.0" fill="rgb(223,6,9)" rx="2" ry="2" />
+<text  x="921.99" y="1391.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (29 samples, 1.09%)</title><rect x="1018.1" y="597" width="12.8" height="15.0" fill="rgb(246,86,20)" rx="2" ry="2" />
+<text  x="1021.06" y="607.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (7 samples, 0.26%)</title><rect x="797.7" y="229" width="3.1" height="15.0" fill="rgb(211,213,47)" rx="2" ry="2" />
+<text  x="800.70" y="239.5" ></text>
+</g>
+<g >
+<title>(FLET ASDF/SYSTEM-REGISTRY::TRY :IN ASDF/SYSTEM-REGISTRY:SEARCH-FOR-SYSTEM-DEFINITION) (13 samples, 0.49%)</title><rect x="1153.6" y="1573" width="5.7" height="15.0" fill="rgb(228,8,46)" rx="2" ry="2" />
+<text  x="1156.57" y="1583.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="795.5" y="133" width="0.4" height="15.0" fill="rgb(242,32,2)" rx="2" ry="2" />
+<text  x="798.48" y="143.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (13 samples, 0.49%)</title><rect x="564.5" y="1061" width="5.7" height="15.0" fill="rgb(238,63,33)" rx="2" ry="2" />
+<text  x="567.46" y="1071.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AROUND (T)) (19 samples, 0.72%)</title><rect x="709.3" y="709" width="8.4" height="15.0" fill="rgb(211,181,54)" rx="2" ry="2" />
+<text  x="712.29" y="719.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (102 samples, 3.84%)</title><rect x="556.5" y="1157" width="45.3" height="15.0" fill="rgb(228,88,9)" rx="2" ry="2" />
+<text  x="559.46" y="1167.5" >(SB-..</text>
+</g>
+<g >
+<title>MAKE-FD-STREAM (6 samples, 0.23%)</title><rect x="1133.6" y="1477" width="2.6" height="15.0" fill="rgb(227,155,6)" rx="2" ry="2" />
+<text  x="1136.58" y="1487.5" ></text>
+</g>
+<g >
+<title>INSTALL-OPTIMIZED-CONSTRUCTOR (18 samples, 0.68%)</title><rect x="1118.5" y="1381" width="8.0" height="15.0" fill="rgb(214,84,26)" rx="2" ry="2" />
+<text  x="1121.47" y="1391.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (167 samples, 6.29%)</title><rect x="726.6" y="773" width="74.2" height="15.0" fill="rgb(235,24,36)" rx="2" ry="2" />
+<text  x="729.62" y="783.5" >(LAMBDA ..</text>
+</g>
+<g >
+<title>WALK-LAMBDA (39 samples, 1.47%)</title><rect x="1060.7" y="1189" width="17.3" height="15.0" fill="rgb(240,3,54)" rx="2" ry="2" />
+<text  x="1063.72" y="1199.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (23 samples, 0.87%)</title><rect x="764.4" y="389" width="10.2" height="15.0" fill="rgb(240,103,37)" rx="2" ry="2" />
+<text  x="767.38" y="399.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="594.7" y="709" width="1.7" height="15.0" fill="rgb(224,161,7)" rx="2" ry="2" />
+<text  x="597.67" y="719.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;LAMBDA0&quot; :IN &quot;SYS:SRC (69 samples, 2.60%)</title><rect x="1000.3" y="1269" width="30.6" height="15.0" fill="rgb(240,204,31)" rx="2" ry="2" />
+<text  x="1003.29" y="1279.5" >(F..</text>
+</g>
+<g >
+<title>PARSE-COMPONENT-FORM (8 samples, 0.30%)</title><rect x="596.4" y="773" width="3.6" height="15.0" fill="rgb(224,153,16)" rx="2" ry="2" />
+<text  x="599.45" y="783.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-COMBINATION-CHECKING-TYPE (9 samples, 0.34%)</title><rect x="1186.0" y="853" width="4.0" height="15.0" fill="rgb(208,171,50)" rx="2" ry="2" />
+<text  x="1189.00" y="863.5" ></text>
+</g>
+<g >
+<title>DISPATCH-DFUN-COST (10 samples, 0.38%)</title><rect x="1082.0" y="1269" width="4.5" height="15.0" fill="rgb(205,151,9)" rx="2" ry="2" />
+<text  x="1085.04" y="1279.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (324 samples, 12.20%)</title><rect x="656.9" y="1045" width="143.9" height="15.0" fill="rgb(236,33,10)" rx="2" ry="2" />
+<text  x="659.87" y="1055.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>IR1-CONVERT (61 samples, 2.30%)</title><rect x="1003.8" y="1109" width="27.1" height="15.0" fill="rgb(237,213,15)" rx="2" ry="2" />
+<text  x="1006.85" y="1119.5" >I..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOCATE-SYSTEM) (16 samples, 0.60%)</title><rect x="1152.2" y="1621" width="7.1" height="15.0" fill="rgb(246,96,32)" rx="2" ry="2" />
+<text  x="1155.24" y="1631.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::LOAD-STREAM :IN LOAD) (37 samples, 1.39%)</title><rect x="1173.6" y="1333" width="16.4" height="15.0" fill="rgb(227,129,23)" rx="2" ry="2" />
+<text  x="1176.56" y="1343.5" ></text>
+</g>
+<g >
+<title>TARGET-MAIN.LISP&quot;) (24 samples, 0.90%)</title><rect x="1179.3" y="1093" width="10.7" height="15.0" fill="rgb(213,173,47)" rx="2" ry="2" />
+<text  x="1182.34" y="1103.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN SB-WALKER::WALK-FORM-INTERNAL) (21 samples, 0.79%)</title><rect x="1068.7" y="901" width="9.3" height="15.0" fill="rgb(237,98,31)" rx="2" ry="2" />
+<text  x="1071.71" y="911.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (423 samples, 15.93%)</title><rect x="612.9" y="1221" width="187.9" height="15.0" fill="rgb(218,56,7)" rx="2" ry="2" />
+<text  x="615.88" y="1231.5" >(LAMBDA NIL :IN ASDF/ACT..</text>
+</g>
+<g >
+<title>%MAP-FOR-EFFECT-ARITY-1 (14 samples, 0.53%)</title><rect x="1153.1" y="1589" width="6.2" height="15.0" fill="rgb(219,75,14)" rx="2" ry="2" />
+<text  x="1156.12" y="1599.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (18 samples, 0.68%)</title><rect x="673.8" y="885" width="7.9" height="15.0" fill="rgb(224,108,47)" rx="2" ry="2" />
+<text  x="676.75" y="895.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::LOAD-STREAM :IN LOAD) (34 samples, 1.28%)</title><rect x="584.9" y="917" width="15.1" height="15.0" fill="rgb(246,68,0)" rx="2" ry="2" />
+<text  x="587.89" y="927.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (245 samples, 9.22%)</title><rect x="692.0" y="949" width="108.8" height="15.0" fill="rgb(215,215,45)" rx="2" ry="2" />
+<text  x="694.97" y="959.5" >(LAMBDA NIL :..</text>
+</g>
+<g >
+<title>LOAD (484 samples, 18.22%)</title><rect x="933.2" y="1509" width="215.0" height="15.0" fill="rgb(214,15,28)" rx="2" ry="2" />
+<text  x="936.21" y="1519.5" >LOAD</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE:CREATE-SCANNER (STRING)) (19 samples, 0.72%)</title><rect x="1078.0" y="1413" width="8.5" height="15.0" fill="rgb(218,167,25)" rx="2" ry="2" />
+<text  x="1081.04" y="1423.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-CURRENT-SOURCE-FORM (22 samples, 0.83%)</title><rect x="1068.3" y="917" width="9.7" height="15.0" fill="rgb(244,15,43)" rx="2" ry="2" />
+<text  x="1071.27" y="927.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="598.2" y="709" width="1.8" height="15.0" fill="rgb(208,17,1)" rx="2" ry="2" />
+<text  x="601.22" y="719.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN (T)) (17 samples, 0.64%)</title><rect x="710.2" y="677" width="7.5" height="15.0" fill="rgb(210,219,19)" rx="2" ry="2" />
+<text  x="713.18" y="687.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (95 samples, 3.58%)</title><rect x="758.6" y="485" width="42.2" height="15.0" fill="rgb(213,155,16)" rx="2" ry="2" />
+<text  x="761.61" y="495.5" >MAP..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN (T)) (46 samples, 1.73%)</title><rect x="1169.6" y="1477" width="20.4" height="15.0" fill="rgb(224,185,52)" rx="2" ry="2" />
+<text  x="1172.56" y="1487.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CLOSE (SB-KERNEL:ANSI-STREAM)) (3 samples, 0.11%)</title><rect x="608.0" y="949" width="1.3" height="15.0" fill="rgb(212,216,19)" rx="2" ry="2" />
+<text  x="611.00" y="959.5" ></text>
+</g>
+<g >
+<title>INSTALL-OPTIMIZED-CONSTRUCTOR (76 samples, 2.86%)</title><rect x="997.2" y="1381" width="33.7" height="15.0" fill="rgb(252,122,46)" rx="2" ry="2" />
+<text  x="1000.18" y="1391.5" >IN..</text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (17 samples, 0.64%)</title><rect x="1182.4" y="981" width="7.6" height="15.0" fill="rgb(242,218,41)" rx="2" ry="2" />
+<text  x="1185.45" y="991.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (6 samples, 0.23%)</title><rect x="1028.3" y="229" width="2.6" height="15.0" fill="rgb(212,178,40)" rx="2" ry="2" />
+<text  x="1031.28" y="239.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD MAKE-INSTANCE (CLASS)) (4 samples, 0.15%)</title><rect x="1090.0" y="1285" width="1.8" height="15.0" fill="rgb(229,49,7)" rx="2" ry="2" />
+<text  x="1093.04" y="1295.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (10 samples, 0.38%)</title><rect x="796.4" y="277" width="4.4" height="15.0" fill="rgb(239,151,29)" rx="2" ry="2" />
+<text  x="799.37" y="287.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-ENSURE-CLASS-CONTEXT (8 samples, 0.30%)</title><rect x="1088.3" y="1349" width="3.5" height="15.0" fill="rgb(246,101,38)" rx="2" ry="2" />
+<text  x="1091.26" y="1359.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LET (39 samples, 1.47%)</title><rect x="1013.6" y="757" width="17.3" height="15.0" fill="rgb(219,130,23)" rx="2" ry="2" />
+<text  x="1016.62" y="767.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (51 samples, 1.92%)</title><rect x="1008.3" y="949" width="22.6" height="15.0" fill="rgb(228,150,5)" rx="2" ry="2" />
+<text  x="1011.29" y="959.5" >I..</text>
+</g>
+<g >
+<title>IR1-CONVERT-FUNCTION (58 samples, 2.18%)</title><rect x="1005.2" y="1061" width="25.7" height="15.0" fill="rgb(245,95,41)" rx="2" ry="2" />
+<text  x="1008.18" y="1071.5" >I..</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (255 samples, 9.60%)</title><rect x="687.5" y="981" width="113.3" height="15.0" fill="rgb(244,132,39)" rx="2" ry="2" />
+<text  x="690.52" y="991.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (6 samples, 0.23%)</title><rect x="1089.1" y="1317" width="2.7" height="15.0" fill="rgb(240,6,7)" rx="2" ry="2" />
+<text  x="1092.15" y="1327.5" ></text>
+</g>
+<g >
+<title>PACK (6 samples, 0.23%)</title><rect x="1075.4" y="629" width="2.6" height="15.0" fill="rgb(248,14,52)" rx="2" ry="2" />
+<text  x="1078.38" y="639.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (3 samples, 0.11%)</title><rect x="995.0" y="1285" width="1.3" height="15.0" fill="rgb(208,67,46)" rx="2" ry="2" />
+<text  x="997.96" y="1295.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="568.0" y="933" width="2.2" height="15.0" fill="rgb(232,201,23)" rx="2" ry="2" />
+<text  x="571.01" y="943.5" ></text>
+</g>
+<g >
+<title>ENSURE-PACKAGE (20 samples, 0.75%)</title><rect x="1031.8" y="1397" width="8.9" height="15.0" fill="rgb(217,85,5)" rx="2" ry="2" />
+<text  x="1034.84" y="1407.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (10 samples, 0.38%)</title><rect x="565.8" y="1013" width="4.4" height="15.0" fill="rgb(226,43,23)" rx="2" ry="2" />
+<text  x="568.79" y="1023.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (22 samples, 0.83%)</title><rect x="708.0" y="757" width="9.7" height="15.0" fill="rgb(211,41,9)" rx="2" ry="2" />
+<text  x="710.96" y="767.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (22 samples, 0.83%)</title><rect x="1021.2" y="485" width="9.7" height="15.0" fill="rgb(244,148,54)" rx="2" ry="2" />
+<text  x="1024.17" y="495.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (1,889 samples, 71.12%)</title><rect x="309.0" y="1701" width="839.2" height="15.0" fill="rgb(217,194,26)" rx="2" ry="2" />
+<text  x="312.00" y="1711.5" >(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T))</text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (12 samples, 0.45%)</title><rect x="1025.6" y="325" width="5.3" height="15.0" fill="rgb(218,115,50)" rx="2" ry="2" />
+<text  x="1028.62" y="335.5" ></text>
+</g>
+<g >
+<title>AUGMENT-TYPE (1 samples, 0.04%)</title><rect x="1086.0" y="1125" width="0.5" height="15.0" fill="rgb(207,52,30)" rx="2" ry="2" />
+<text  x="1089.04" y="1135.5" ></text>
+</g>
+<g >
+<title>%PROCESSING-DECLS (14 samples, 0.53%)</title><rect x="1024.7" y="357" width="6.2" height="15.0" fill="rgb(242,100,49)" rx="2" ry="2" />
+<text  x="1027.73" y="367.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (139 samples, 5.23%)</title><rect x="739.1" y="661" width="61.7" height="15.0" fill="rgb(232,143,41)" rx="2" ry="2" />
+<text  x="742.06" y="671.5" >TRAVER..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :GREEDY-REPETITION) T)) (14 samples, 0.53%)</title><rect x="1080.3" y="1333" width="6.2" height="15.0" fill="rgb(235,24,53)" rx="2" ry="2" />
+<text  x="1083.26" y="1343.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (730 samples, 27.48%)</title><rect x="476.5" y="1429" width="324.3" height="15.0" fill="rgb(226,66,38)" rx="2" ry="2" />
+<text  x="479.49" y="1439.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (678 samples, 25.53%)</title><rect x="499.6" y="1365" width="301.2" height="15.0" fill="rgb(219,156,36)" rx="2" ry="2" />
+<text  x="502.59" y="1375.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (9 samples, 0.34%)</title><rect x="915.9" y="1413" width="4.0" height="15.0" fill="rgb(209,14,54)" rx="2" ry="2" />
+<text  x="918.88" y="1423.5" ></text>
+</g>
+<g >
+<title>FIND-AND-PROPAGATE-CONSTRAINTS (6 samples, 0.23%)</title><rect x="1053.6" y="981" width="2.7" height="15.0" fill="rgb(205,28,36)" rx="2" ry="2" />
+<text  x="1056.61" y="991.5" ></text>
+</g>
+<g >
+<title>GET-FILE-STAMP (10 samples, 0.38%)</title><rect x="443.2" y="1477" width="4.4" height="15.0" fill="rgb(206,168,16)" rx="2" ry="2" />
+<text  x="446.17" y="1487.5" ></text>
+</g>
+<g >
+<title>foreign function __getattrlist (1 samples, 0.04%)</title><rect x="653.3" y="885" width="0.5" height="15.0" fill="rgb(222,48,12)" rx="2" ry="2" />
+<text  x="656.31" y="895.5" ></text>
+</g>
+<g >
+<title>FIND-ASDF-SYSTEM-FILE (8 samples, 0.30%)</title><rect x="684.0" y="837" width="3.5" height="15.0" fill="rgb(249,57,7)" rx="2" ry="2" />
+<text  x="686.97" y="847.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (769 samples, 28.95%)</title><rect x="459.2" y="1477" width="341.6" height="15.0" fill="rgb(218,183,48)" rx="2" ry="2" />
+<text  x="462.16" y="1487.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITIN..</text>
+</g>
+<g >
+<title>FIND-THING-NAMED (10 samples, 0.38%)</title><rect x="604.9" y="1061" width="4.4" height="15.0" fill="rgb(236,10,19)" rx="2" ry="2" />
+<text  x="607.89" y="1071.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="595.1" y="693" width="1.3" height="15.0" fill="rgb(224,26,1)" rx="2" ry="2" />
+<text  x="598.11" y="703.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (183 samples, 6.89%)</title><rect x="719.5" y="837" width="81.3" height="15.0" fill="rgb(229,48,19)" rx="2" ry="2" />
+<text  x="722.51" y="847.5" >(LAMBDA N..</text>
+</g>
+<g >
+<title>(LABELS SB-FASL::EVAL-FORM :IN SB-INT:LOAD-AS-SOURCE) (31 samples, 1.17%)</title><rect x="1176.2" y="1237" width="13.8" height="15.0" fill="rgb(239,12,31)" rx="2" ry="2" />
+<text  x="1179.23" y="1247.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD SHARED-INITIALIZE :AFTER (SB-PCL::STD-CLASS T)) (2 samples, 0.08%)</title><rect x="1090.9" y="1253" width="0.9" height="15.0" fill="rgb(242,162,51)" rx="2" ry="2" />
+<text  x="1093.93" y="1263.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (41 samples, 1.54%)</title><rect x="763.0" y="421" width="18.3" height="15.0" fill="rgb(229,84,22)" rx="2" ry="2" />
+<text  x="766.05" y="431.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:MAKE-PLAN) (919 samples, 34.60%)</title><rect x="392.5" y="1637" width="408.3" height="15.0" fill="rgb(226,192,52)" rx="2" ry="2" />
+<text  x="395.52" y="1647.5" >(LAMBDA NIL :IN ASDF/PLAN:MAKE-PLAN)</text>
+</g>
+<g >
+<title>(LABELS SB-FASL::AUX-FOP-INTERN :IN &quot;SYS:SRC (7 samples, 0.26%)</title><rect x="993.2" y="1413" width="3.1" height="15.0" fill="rgb(206,65,10)" rx="2" ry="2" />
+<text  x="996.19" y="1423.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-BLOCK (50 samples, 1.88%)</title><rect x="1008.7" y="933" width="22.2" height="15.0" fill="rgb(250,105,9)" rx="2" ry="2" />
+<text  x="1011.73" y="943.5" >I..</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (4 samples, 0.15%)</title><rect x="1084.7" y="1173" width="1.8" height="15.0" fill="rgb(223,164,39)" rx="2" ry="2" />
+<text  x="1087.71" y="1183.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-CURRENT-SOURCE-FORM (41 samples, 1.54%)</title><rect x="1059.8" y="1221" width="18.2" height="15.0" fill="rgb(238,174,33)" rx="2" ry="2" />
+<text  x="1062.83" y="1231.5" ></text>
+</g>
+<g >
+<title>LTN-ANALYZE-KNOWN-CALL (5 samples, 0.19%)</title><rect x="1124.2" y="1141" width="2.3" height="15.0" fill="rgb(226,104,35)" rx="2" ry="2" />
+<text  x="1127.25" y="1151.5" ></text>
+</g>
+<g >
+<title>FIND-THING-NAMED (8 samples, 0.30%)</title><rect x="777.7" y="293" width="3.6" height="15.0" fill="rgb(214,180,14)" rx="2" ry="2" />
+<text  x="780.71" y="303.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (40 samples, 1.51%)</title><rect x="1013.2" y="773" width="17.7" height="15.0" fill="rgb(210,133,21)" rx="2" ry="2" />
+<text  x="1016.18" y="783.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (52 samples, 1.96%)</title><rect x="1007.8" y="965" width="23.1" height="15.0" fill="rgb(245,18,45)" rx="2" ry="2" />
+<text  x="1010.85" y="975.5" >I..</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (111 samples, 4.18%)</title><rect x="751.5" y="549" width="49.3" height="15.0" fill="rgb(205,39,34)" rx="2" ry="2" />
+<text  x="754.50" y="559.5" >MAP-..</text>
+</g>
+<g >
+<title>SYSTEM-DEFINITION-SEARCHER (12 samples, 0.45%)</title><rect x="1154.0" y="1557" width="5.3" height="15.0" fill="rgb(231,132,3)" rx="2" ry="2" />
+<text  x="1157.01" y="1567.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (367 samples, 13.82%)</title><rect x="637.8" y="1109" width="163.0" height="15.0" fill="rgb(233,139,5)" rx="2" ry="2" />
+<text  x="640.76" y="1119.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>IR1-CONVERT-SETQ (15 samples, 0.56%)</title><rect x="1183.3" y="949" width="6.7" height="15.0" fill="rgb(237,189,8)" rx="2" ry="2" />
+<text  x="1186.34" y="959.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (133 samples, 5.01%)</title><rect x="550.2" y="1205" width="59.1" height="15.0" fill="rgb(210,189,3)" rx="2" ry="2" />
+<text  x="553.24" y="1215.5" >CONSUL..</text>
+</g>
+<g >
+<title>MAKE-CACHING-DFUN (12 samples, 0.45%)</title><rect x="1081.2" y="1301" width="5.3" height="15.0" fill="rgb(254,74,12)" rx="2" ry="2" />
+<text  x="1084.15" y="1311.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM-IN-DIST (T QL-DIST:DIST)) (9 samples, 0.34%)</title><rect x="605.3" y="1045" width="4.0" height="15.0" fill="rgb(212,127,34)" rx="2" ry="2" />
+<text  x="608.33" y="1055.5" ></text>
+</g>
+<g >
+<title>AUTOLOAD-SYSTEM-AND-DEPENDENCIES (2,460 samples, 92.62%)</title><rect x="97.1" y="1861" width="1092.9" height="15.0" fill="rgb(220,180,32)" rx="2" ry="2" />
+<text  x="100.08" y="1871.5" >AUTOLOAD-SYSTEM-AND-DEPENDENCIES</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (240 samples, 9.04%)</title><rect x="694.2" y="933" width="106.6" height="15.0" fill="rgb(248,74,44)" rx="2" ry="2" />
+<text  x="697.19" y="943.5" >MAP-DIRECT-DE..</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (407 samples, 15.32%)</title><rect x="620.0" y="1189" width="180.8" height="15.0" fill="rgb(232,157,54)" rx="2" ry="2" />
+<text  x="622.99" y="1199.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (9 samples, 0.34%)</title><rect x="1082.5" y="1253" width="4.0" height="15.0" fill="rgb(212,213,47)" rx="2" ry="2" />
+<text  x="1085.48" y="1263.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (250 samples, 9.41%)</title><rect x="689.7" y="965" width="111.1" height="15.0" fill="rgb(242,227,43)" rx="2" ry="2" />
+<text  x="692.74" y="975.5" >(LAMBDA NIL :..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (151 samples, 5.69%)</title><rect x="733.7" y="709" width="67.1" height="15.0" fill="rgb(250,178,28)" rx="2" ry="2" />
+<text  x="736.73" y="719.5" >(LAMBDA..</text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (55 samples, 2.07%)</title><rect x="1006.5" y="1013" width="24.4" height="15.0" fill="rgb(252,154,51)" rx="2" ry="2" />
+<text  x="1009.51" y="1023.5" >I..</text>
+</g>
+<g >
+<title>IR1-CONVERT-LET* (15 samples, 0.56%)</title><rect x="1024.3" y="373" width="6.6" height="15.0" fill="rgb(236,112,51)" rx="2" ry="2" />
+<text  x="1027.28" y="383.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (63 samples, 2.37%)</title><rect x="1003.0" y="1141" width="27.9" height="15.0" fill="rgb(217,119,11)" rx="2" ry="2" />
+<text  x="1005.96" y="1151.5" >I..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (45 samples, 1.69%)</title><rect x="761.3" y="453" width="20.0" height="15.0" fill="rgb(210,164,12)" rx="2" ry="2" />
+<text  x="764.27" y="463.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (7 samples, 0.26%)</title><rect x="567.1" y="965" width="3.1" height="15.0" fill="rgb(235,200,45)" rx="2" ry="2" />
+<text  x="570.12" y="975.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM (T)) (11 samples, 0.41%)</title><rect x="604.4" y="1077" width="4.9" height="15.0" fill="rgb(250,16,18)" rx="2" ry="2" />
+<text  x="607.44" y="1087.5" ></text>
+</g>
+<g >
+<title>(FLET SB-IMPL::THUNK :IN IMPORT) (2 samples, 0.08%)</title><rect x="1036.7" y="1237" width="0.9" height="15.0" fill="rgb(226,59,5)" rx="2" ry="2" />
+<text  x="1039.72" y="1247.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-GLOBAL-FUNCTOID (17 samples, 0.64%)</title><rect x="1023.4" y="405" width="7.5" height="15.0" fill="rgb(210,204,39)" rx="2" ry="2" />
+<text  x="1026.40" y="415.5" ></text>
+</g>
+<g >
+<title>COMPILE-COMPONENT (9 samples, 0.34%)</title><rect x="1122.5" y="1205" width="4.0" height="15.0" fill="rgb(239,77,12)" rx="2" ry="2" />
+<text  x="1125.47" y="1215.5" ></text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (8 samples, 0.30%)</title><rect x="678.2" y="725" width="3.5" height="15.0" fill="rgb(240,200,7)" rx="2" ry="2" />
+<text  x="681.19" y="735.5" ></text>
+</g>
+<g >
+<title>UNIX-REALPATH (3 samples, 0.11%)</title><rect x="917.7" y="1381" width="1.3" height="15.0" fill="rgb(208,151,30)" rx="2" ry="2" />
+<text  x="920.66" y="1391.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (131 samples, 4.93%)</title><rect x="742.6" y="629" width="58.2" height="15.0" fill="rgb(241,179,9)" rx="2" ry="2" />
+<text  x="745.61" y="639.5" >(LAMBD..</text>
+</g>
+<g >
+<title>(SB-PCL::EMF SHARED-INITIALIZE) (3 samples, 0.11%)</title><rect x="1090.5" y="1269" width="1.3" height="15.0" fill="rgb(206,8,28)" rx="2" ry="2" />
+<text  x="1093.48" y="1279.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="800.4" y="133" width="0.4" height="15.0" fill="rgb(207,90,46)" rx="2" ry="2" />
+<text  x="803.37" y="143.5" ></text>
+</g>
+<g >
+<title>LTN-ANALYZE-BLOCK (6 samples, 0.23%)</title><rect x="1123.8" y="1157" width="2.7" height="15.0" fill="rgb(236,226,45)" rx="2" ry="2" />
+<text  x="1126.80" y="1167.5" ></text>
+</g>
+<g >
+<title>FIND-ASDF-SYSTEM-FILE (10 samples, 0.38%)</title><rect x="776.8" y="325" width="4.5" height="15.0" fill="rgb(227,191,46)" rx="2" ry="2" />
+<text  x="779.82" y="335.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :SEQUENCE) T)) (23 samples, 0.87%)</title><rect x="1046.1" y="1285" width="10.2" height="15.0" fill="rgb(213,53,20)" rx="2" ry="2" />
+<text  x="1049.05" y="1295.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (15 samples, 0.56%)</title><rect x="767.9" y="261" width="6.7" height="15.0" fill="rgb(215,32,25)" rx="2" ry="2" />
+<text  x="770.94" y="271.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::THUNK :IN LOAD) (363 samples, 13.67%)</title><rect x="965.2" y="1461" width="161.3" height="15.0" fill="rgb(205,76,42)" rx="2" ry="2" />
+<text  x="968.20" y="1471.5" >(FLET SB-FASL::THUNK..</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (3 samples, 0.11%)</title><rect x="1085.2" y="1157" width="1.3" height="15.0" fill="rgb(248,103,0)" rx="2" ry="2" />
+<text  x="1088.15" y="1167.5" ></text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (9 samples, 0.34%)</title><rect x="649.8" y="1013" width="4.0" height="15.0" fill="rgb(229,44,6)" rx="2" ry="2" />
+<text  x="652.76" y="1023.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (16 samples, 0.60%)</title><rect x="1182.9" y="965" width="7.1" height="15.0" fill="rgb(245,123,4)" rx="2" ry="2" />
+<text  x="1185.89" y="975.5" ></text>
+</g>
+<g >
+<title>FIND-OK-TARGET-OFFSET (3 samples, 0.11%)</title><rect x="1076.7" y="581" width="1.3" height="15.0" fill="rgb(222,47,10)" rx="2" ry="2" />
+<text  x="1079.71" y="591.5" ></text>
+</g>
+<g >
+<title>(LAMBDA (SB-KERNEL:FORM &amp;KEY :CURRENT-INDEX &amp;ALLOW-OTHER-KEYS) :IN SB-INT:LOAD-AS-SOURCE) (32 samples, 1.20%)</title><rect x="1175.8" y="1253" width="14.2" height="15.0" fill="rgb(224,166,47)" rx="2" ry="2" />
+<text  x="1178.78" y="1263.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (18 samples, 0.68%)</title><rect x="1048.3" y="1205" width="8.0" height="15.0" fill="rgb(207,26,20)" rx="2" ry="2" />
+<text  x="1051.28" y="1215.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;LAMBDA0&quot; :IN &quot;SYS:SRC (24 samples, 0.90%)</title><rect x="1179.3" y="1125" width="10.7" height="15.0" fill="rgb(237,213,34)" rx="2" ry="2" />
+<text  x="1182.34" y="1135.5" ></text>
+</g>
+<g >
+<title>VECTORISH-LTN-ANNOTATE-HELPER (4 samples, 0.15%)</title><rect x="1124.7" y="1125" width="1.8" height="15.0" fill="rgb(230,162,27)" rx="2" ry="2" />
+<text  x="1127.69" y="1135.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (10 samples, 0.38%)</title><rect x="1026.5" y="293" width="4.4" height="15.0" fill="rgb(227,179,44)" rx="2" ry="2" />
+<text  x="1029.51" y="303.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (159 samples, 5.99%)</title><rect x="730.2" y="741" width="70.6" height="15.0" fill="rgb(234,58,35)" rx="2" ry="2" />
+<text  x="733.17" y="751.5" >MAP-DIR..</text>
+</g>
+<g >
+<title>GET-FILE-STAMP (9 samples, 0.34%)</title><rect x="677.7" y="741" width="4.0" height="15.0" fill="rgb(245,204,52)" rx="2" ry="2" />
+<text  x="680.75" y="751.5" ></text>
+</g>
+<g >
+<title>RESOLVE-DEPENDENCY-NAME (143 samples, 5.38%)</title><rect x="545.8" y="1237" width="63.5" height="15.0" fill="rgb(208,156,26)" rx="2" ry="2" />
+<text  x="548.80" y="1247.5" >RESOLV..</text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (3 samples, 0.11%)</title><rect x="1107.4" y="1381" width="1.3" height="15.0" fill="rgb(230,61,16)" rx="2" ry="2" />
+<text  x="1110.36" y="1391.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (37 samples, 1.39%)</title><rect x="1014.5" y="725" width="16.4" height="15.0" fill="rgb(246,117,10)" rx="2" ry="2" />
+<text  x="1017.51" y="735.5" ></text>
+</g>
+<g >
+<title>OPEN (41 samples, 1.54%)</title><rect x="1130.0" y="1493" width="18.2" height="15.0" fill="rgb(251,216,19)" rx="2" ry="2" />
+<text  x="1133.02" y="1503.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (62 samples, 2.33%)</title><rect x="1162.5" y="1733" width="27.5" height="15.0" fill="rgb(249,25,42)" rx="2" ry="2" />
+<text  x="1165.45" y="1743.5" >(..</text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (25 samples, 0.94%)</title><rect x="1178.9" y="1141" width="11.1" height="15.0" fill="rgb(214,206,12)" rx="2" ry="2" />
+<text  x="1181.89" y="1151.5" ></text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (2 samples, 0.08%)</title><rect x="716.8" y="437" width="0.9" height="15.0" fill="rgb(253,196,47)" rx="2" ry="2" />
+<text  x="719.84" y="447.5" ></text>
+</g>
+<g >
+<title>(FLET SB-REGALLOC::FROB-SLOT :IN SB-REGALLOC::%CALL-WITH-TARGET-TNS) (2 samples, 0.08%)</title><rect x="1077.2" y="565" width="0.8" height="15.0" fill="rgb(212,112,49)" rx="2" ry="2" />
+<text  x="1080.15" y="575.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA (34 samples, 1.28%)</title><rect x="1015.8" y="677" width="15.1" height="15.0" fill="rgb(207,194,17)" rx="2" ry="2" />
+<text  x="1018.84" y="687.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (431 samples, 16.23%)</title><rect x="609.3" y="1237" width="191.5" height="15.0" fill="rgb(215,209,33)" rx="2" ry="2" />
+<text  x="612.33" y="1247.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>CALL-WITH-LOAD-BINDINGS (36 samples, 1.36%)</title><rect x="1174.0" y="1317" width="16.0" height="15.0" fill="rgb(229,24,49)" rx="2" ry="2" />
+<text  x="1177.01" y="1327.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (21 samples, 0.79%)</title><rect x="765.3" y="357" width="9.3" height="15.0" fill="rgb(222,75,40)" rx="2" ry="2" />
+<text  x="768.27" y="367.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (415 samples, 15.62%)</title><rect x="616.4" y="1205" width="184.4" height="15.0" fill="rgb(221,90,37)" rx="2" ry="2" />
+<text  x="619.44" y="1215.5" >(LAMBDA NIL :IN ASDF/PLA..</text>
+</g>
+<g >
+<title>foreign function sb_realpath (2 samples, 0.08%)</title><rect x="918.1" y="1365" width="0.9" height="15.0" fill="rgb(240,163,21)" rx="2" ry="2" />
+<text  x="921.10" y="1375.5" ></text>
+</g>
+<g >
+<title>%WITH-STANDARD-IO-SYNTAX (50 samples, 1.88%)</title><rect x="579.6" y="981" width="22.2" height="15.0" fill="rgb(228,206,7)" rx="2" ry="2" />
+<text  x="582.56" y="991.5" >%..</text>
+</g>
+<g >
+<title>GET-FILE-STAMP (9 samples, 0.34%)</title><rect x="796.8" y="261" width="4.0" height="15.0" fill="rgb(241,85,2)" rx="2" ry="2" />
+<text  x="799.81" y="271.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (115 samples, 4.33%)</title><rect x="749.7" y="565" width="51.1" height="15.0" fill="rgb(221,223,18)" rx="2" ry="2" />
+<text  x="752.72" y="575.5" >(LAMB..</text>
+</g>
+<g >
+<title>(FLET SB-FASL::SCAN :IN SB-FASL::FASL-HEADER-P) (7 samples, 0.26%)</title><rect x="714.6" y="517" width="3.1" height="15.0" fill="rgb(221,180,32)" rx="2" ry="2" />
+<text  x="717.62" y="527.5" ></text>
+</g>
+<g >
+<title>INSTALL-OPTIMIZED-CONSTRUCTOR (19 samples, 0.72%)</title><rect x="1047.8" y="1221" width="8.5" height="15.0" fill="rgb(246,102,7)" rx="2" ry="2" />
+<text  x="1050.83" y="1231.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-DEFINING-CLASS (12 samples, 0.45%)</title><rect x="1086.5" y="1413" width="5.3" height="15.0" fill="rgb(224,23,24)" rx="2" ry="2" />
+<text  x="1089.48" y="1423.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-PACKAGE-GRAPH (10 samples, 0.38%)</title><rect x="1033.2" y="1365" width="4.4" height="15.0" fill="rgb(216,79,41)" rx="2" ry="2" />
+<text  x="1036.17" y="1375.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (51 samples, 1.92%)</title><rect x="1167.3" y="1557" width="22.7" height="15.0" fill="rgb(228,118,0)" rx="2" ry="2" />
+<text  x="1170.34" y="1567.5" >(..</text>
+</g>
+<g >
+<title>COMPILE-IN-LEXENV (13 samples, 0.49%)</title><rect x="1120.7" y="1301" width="5.8" height="15.0" fill="rgb(207,98,7)" rx="2" ry="2" />
+<text  x="1123.69" y="1311.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (4 samples, 0.15%)</title><rect x="1128.2" y="1429" width="1.8" height="15.0" fill="rgb(224,160,47)" rx="2" ry="2" />
+<text  x="1131.25" y="1439.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;LAMBDA0&quot; :IN &quot;SYS:SRC (12 samples, 0.45%)</title><rect x="1050.9" y="1109" width="5.4" height="15.0" fill="rgb(254,172,2)" rx="2" ry="2" />
+<text  x="1053.94" y="1119.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (4 samples, 0.15%)</title><rect x="1038.9" y="1333" width="1.8" height="15.0" fill="rgb(227,182,31)" rx="2" ry="2" />
+<text  x="1041.95" y="1343.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="599.6" y="661" width="0.4" height="15.0" fill="rgb(220,22,40)" rx="2" ry="2" />
+<text  x="602.56" y="671.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (17 samples, 0.64%)</title><rect x="1048.7" y="1189" width="7.6" height="15.0" fill="rgb(238,79,13)" rx="2" ry="2" />
+<text  x="1051.72" y="1199.5" ></text>
+</g>
+<g >
+<title>WALK-LOCALLY (32 samples, 1.20%)</title><rect x="1063.8" y="1077" width="14.2" height="15.0" fill="rgb(213,17,39)" rx="2" ry="2" />
+<text  x="1066.83" y="1087.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (569 samples, 21.42%)</title><rect x="895.4" y="1541" width="252.8" height="15.0" fill="rgb(251,61,25)" rx="2" ry="2" />
+<text  x="898.44" y="1551.5" >(SB-PCL::EMF ASDF/ACTION:PERFORM)</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM (ASDF/FIND-SYSTEM:DEFINE-OP ASDF/SYSTEM:SYSTEM)) (13 samples, 0.49%)</title><rect x="712.0" y="613" width="5.7" height="15.0" fill="rgb(237,87,27)" rx="2" ry="2" />
+<text  x="714.96" y="623.5" ></text>
+</g>
+<g >
+<title>MAKE-FD-STREAM (3 samples, 0.11%)</title><rect x="600.4" y="901" width="1.4" height="15.0" fill="rgb(228,16,17)" rx="2" ry="2" />
+<text  x="603.44" y="911.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (37 samples, 1.39%)</title><rect x="671.1" y="949" width="16.4" height="15.0" fill="rgb(247,205,2)" rx="2" ry="2" />
+<text  x="674.08" y="959.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="598.7" y="693" width="1.3" height="15.0" fill="rgb(249,173,34)" rx="2" ry="2" />
+<text  x="601.67" y="703.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (22 samples, 0.83%)</title><rect x="1149.6" y="1717" width="9.7" height="15.0" fill="rgb(238,24,9)" rx="2" ry="2" />
+<text  x="1152.57" y="1727.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:MARK-OPERATION-DONE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (23 samples, 0.87%)</title><rect x="909.7" y="1525" width="10.2" height="15.0" fill="rgb(248,60,14)" rx="2" ry="2" />
+<text  x="912.66" y="1535.5" ></text>
+</g>
+<g >
+<title>TARGET-MAIN.LISP&quot;) (69 samples, 2.60%)</title><rect x="1000.3" y="1237" width="30.6" height="15.0" fill="rgb(245,172,45)" rx="2" ry="2" />
+<text  x="1003.29" y="1247.5" >TA..</text>
+</g>
+<g >
+<title>(FLET SB-FASL::LOAD-STREAM :IN LOAD) (9 samples, 0.34%)</title><rect x="863.0" y="1445" width="4.0" height="15.0" fill="rgb(253,23,32)" rx="2" ry="2" />
+<text  x="866.01" y="1455.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-CURRENT-SOURCE-FORM (34 samples, 1.28%)</title><rect x="1062.9" y="1109" width="15.1" height="15.0" fill="rgb(228,79,39)" rx="2" ry="2" />
+<text  x="1065.94" y="1119.5" ></text>
+</g>
+<g >
+<title>COMPUTE-ACTION-STATUS (11 samples, 0.41%)</title><rect x="676.9" y="773" width="4.8" height="15.0" fill="rgb(234,47,48)" rx="2" ry="2" />
+<text  x="679.86" y="783.5" ></text>
+</g>
+<g >
+<title>IR1-PHASES (9 samples, 0.34%)</title><rect x="1052.3" y="1029" width="4.0" height="15.0" fill="rgb(224,126,27)" rx="2" ry="2" />
+<text  x="1055.27" y="1039.5" ></text>
+</g>
+<g >
+<title>MAKE-FD-STREAM (3 samples, 0.11%)</title><rect x="779.9" y="213" width="1.4" height="15.0" fill="rgb(253,207,44)" rx="2" ry="2" />
+<text  x="782.93" y="223.5" ></text>
+</g>
+<g >
+<title>foreign function fstat$INODE64 (2 samples, 0.08%)</title><rect x="1135.4" y="1445" width="0.8" height="15.0" fill="rgb(219,99,23)" rx="2" ry="2" />
+<text  x="1138.35" y="1455.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (74 samples, 2.79%)</title><rect x="998.1" y="1349" width="32.8" height="15.0" fill="rgb(213,121,33)" rx="2" ry="2" />
+<text  x="1001.07" y="1359.5" >(F..</text>
+</g>
+<g >
+<title>STABLE-SORT-LIST (6 samples, 0.23%)</title><rect x="684.9" y="805" width="2.6" height="15.0" fill="rgb(207,86,28)" rx="2" ry="2" />
+<text  x="687.86" y="815.5" ></text>
+</g>
+<g >
+<title>COMPILE-IN-LEXENV (12 samples, 0.45%)</title><rect x="1072.7" y="757" width="5.3" height="15.0" fill="rgb(236,211,36)" rx="2" ry="2" />
+<text  x="1075.71" y="767.5" ></text>
+</g>
+<g >
+<title>CONSTRAINT-PROPAGATE (7 samples, 0.26%)</title><rect x="1053.2" y="997" width="3.1" height="15.0" fill="rgb(231,2,6)" rx="2" ry="2" />
+<text  x="1056.16" y="1007.5" ></text>
+</g>
+<g >
+<title>FOP.LISP&quot;) (6 samples, 0.23%)</title><rect x="993.6" y="1333" width="2.7" height="15.0" fill="rgb(251,152,7)" rx="2" ry="2" />
+<text  x="996.63" y="1343.5" ></text>
+</g>
+<g >
+<title>PACK-GREEDY (5 samples, 0.19%)</title><rect x="1075.8" y="613" width="2.2" height="15.0" fill="rgb(232,170,21)" rx="2" ry="2" />
+<text  x="1078.82" y="623.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (230 samples, 8.66%)</title><rect x="698.6" y="901" width="102.2" height="15.0" fill="rgb(218,159,0)" rx="2" ry="2" />
+<text  x="701.63" y="911.5" >(LAMBDA NIL ..</text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (1 samples, 0.04%)</title><rect x="1129.6" y="1381" width="0.4" height="15.0" fill="rgb(237,101,46)" rx="2" ry="2" />
+<text  x="1132.58" y="1391.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (64 samples, 2.41%)</title><rect x="1161.6" y="1765" width="28.4" height="15.0" fill="rgb(230,68,22)" rx="2" ry="2" />
+<text  x="1164.57" y="1775.5" >(L..</text>
+</g>
+<g >
+<title>COMPUTE-ACTION-STATUS (12 samples, 0.45%)</title><rect x="442.3" y="1509" width="5.3" height="15.0" fill="rgb(254,45,52)" rx="2" ry="2" />
+<text  x="445.28" y="1519.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (7 samples, 0.26%)</title><rect x="792.8" y="229" width="3.1" height="15.0" fill="rgb(211,215,44)" rx="2" ry="2" />
+<text  x="795.82" y="239.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (235 samples, 8.85%)</title><rect x="696.4" y="917" width="104.4" height="15.0" fill="rgb(219,77,48)" rx="2" ry="2" />
+<text  x="699.41" y="927.5" >TRAVERSE-ACT..</text>
+</g>
+<g >
+<title>(LAMBDA (SB-KERNEL:FORM &amp;KEY :CURRENT-INDEX &amp;ALLOW-OTHER-KEYS) :IN SB-INT:LOAD-AS-SOURCE) (24 samples, 0.90%)</title><rect x="589.3" y="837" width="10.7" height="15.0" fill="rgb(238,128,3)" rx="2" ry="2" />
+<text  x="592.34" y="847.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (7 samples, 0.26%)</title><rect x="916.8" y="1397" width="3.1" height="15.0" fill="rgb(254,106,18)" rx="2" ry="2" />
+<text  x="919.77" y="1407.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (98 samples, 3.69%)</title><rect x="558.2" y="1141" width="43.6" height="15.0" fill="rgb(220,26,25)" rx="2" ry="2" />
+<text  x="561.24" y="1151.5" >(LAM..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (22 samples, 0.83%)</title><rect x="764.8" y="373" width="9.8" height="15.0" fill="rgb(211,54,27)" rx="2" ry="2" />
+<text  x="767.83" y="383.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (9 samples, 0.34%)</title><rect x="1087.8" y="1365" width="4.0" height="15.0" fill="rgb(215,15,44)" rx="2" ry="2" />
+<text  x="1090.82" y="1375.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (27 samples, 1.02%)</title><rect x="1019.0" y="565" width="11.9" height="15.0" fill="rgb(212,110,14)" rx="2" ry="2" />
+<text  x="1021.95" y="575.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (13 samples, 0.49%)</title><rect x="1184.2" y="917" width="5.8" height="15.0" fill="rgb(251,35,32)" rx="2" ry="2" />
+<text  x="1187.22" y="927.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (8 samples, 0.30%)</title><rect x="1091.8" y="1413" width="3.6" height="15.0" fill="rgb(219,161,15)" rx="2" ry="2" />
+<text  x="1094.81" y="1423.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE (11 samples, 0.41%)</title><rect x="915.0" y="1429" width="4.9" height="15.0" fill="rgb(231,21,27)" rx="2" ry="2" />
+<text  x="917.99" y="1439.5" ></text>
+</g>
+<g >
+<title>CODE (7 samples, 0.26%)</title><rect x="993.2" y="1397" width="3.1" height="15.0" fill="rgb(218,164,50)" rx="2" ry="2" />
+<text  x="996.19" y="1407.5" ></text>
+</g>
+<g >
+<title>(FLET ASDF/SYSTEM-REGISTRY::TRY :IN ASDF/SYSTEM-REGISTRY:SEARCH-FOR-SYSTEM-DEFINITION) (14 samples, 0.53%)</title><rect x="603.1" y="1125" width="6.2" height="15.0" fill="rgb(219,46,39)" rx="2" ry="2" />
+<text  x="606.11" y="1135.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (19 samples, 0.72%)</title><rect x="673.3" y="901" width="8.4" height="15.0" fill="rgb(239,108,4)" rx="2" ry="2" />
+<text  x="676.31" y="911.5" ></text>
+</g>
+<g >
+<title>IMPORT (6 samples, 0.23%)</title><rect x="1034.9" y="1301" width="2.7" height="15.0" fill="rgb(241,178,31)" rx="2" ry="2" />
+<text  x="1037.95" y="1311.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (64 samples, 2.41%)</title><rect x="1002.5" y="1157" width="28.4" height="15.0" fill="rgb(244,147,39)" rx="2" ry="2" />
+<text  x="1005.52" y="1167.5" >IR..</text>
+</g>
+<g >
+<title>%INTERN (6 samples, 0.23%)</title><rect x="1038.1" y="1365" width="2.6" height="15.0" fill="rgb(235,128,1)" rx="2" ry="2" />
+<text  x="1041.06" y="1375.5" ></text>
+</g>
+<g >
+<title>(LABELS SB-FASL::EVAL-FORM :IN SB-INT:LOAD-AS-SOURCE) (22 samples, 0.83%)</title><rect x="590.2" y="821" width="9.8" height="15.0" fill="rgb(212,69,42)" rx="2" ry="2" />
+<text  x="593.23" y="831.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-%FUNCALL (3 samples, 0.11%)</title><rect x="1029.6" y="181" width="1.3" height="15.0" fill="rgb(212,102,41)" rx="2" ry="2" />
+<text  x="1032.62" y="191.5" ></text>
+</g>
+<g >
+<title>MODULE-PROVIDE-CONTRIB (11 samples, 0.41%)</title><rect x="862.1" y="1477" width="4.9" height="15.0" fill="rgb(231,89,53)" rx="2" ry="2" />
+<text  x="865.12" y="1487.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (220 samples, 8.28%)</title><rect x="703.1" y="869" width="97.7" height="15.0" fill="rgb(234,198,48)" rx="2" ry="2" />
+<text  x="706.07" y="879.5" >MAP-DIRECT-..</text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (43 samples, 1.62%)</title><rect x="1170.9" y="1429" width="19.1" height="15.0" fill="rgb(230,172,51)" rx="2" ry="2" />
+<text  x="1173.90" y="1439.5" ></text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (2 samples, 0.08%)</title><rect x="866.1" y="1333" width="0.9" height="15.0" fill="rgb(244,5,15)" rx="2" ry="2" />
+<text  x="869.12" y="1343.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (16 samples, 0.60%)</title><rect x="1140.7" y="1445" width="7.1" height="15.0" fill="rgb(252,32,23)" rx="2" ry="2" />
+<text  x="1143.69" y="1455.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (59 samples, 2.22%)</title><rect x="1163.8" y="1685" width="26.2" height="15.0" fill="rgb(231,31,16)" rx="2" ry="2" />
+<text  x="1166.79" y="1695.5" >(..</text>
+</g>
+<g >
+<title>CACHE-MISS-VALUES-INTERNAL (47 samples, 1.77%)</title><rect x="1057.2" y="1317" width="20.8" height="15.0" fill="rgb(236,227,14)" rx="2" ry="2" />
+<text  x="1060.16" y="1327.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :SEQUENCE) T)) (26 samples, 0.98%)</title><rect x="1044.7" y="1333" width="11.6" height="15.0" fill="rgb(224,209,20)" rx="2" ry="2" />
+<text  x="1047.72" y="1343.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (44 samples, 1.66%)</title><rect x="1170.5" y="1445" width="19.5" height="15.0" fill="rgb(240,146,54)" rx="2" ry="2" />
+<text  x="1173.45" y="1455.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (128 samples, 4.82%)</title><rect x="552.5" y="1189" width="56.8" height="15.0" fill="rgb(246,73,21)" rx="2" ry="2" />
+<text  x="555.46" y="1199.5" >(LAMBD..</text>
+</g>
+<g >
+<title>THE-IN-POLICY (11 samples, 0.41%)</title><rect x="1185.1" y="885" width="4.9" height="15.0" fill="rgb(223,86,32)" rx="2" ry="2" />
+<text  x="1188.11" y="895.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-GLOBAL-FUNCTOID (60 samples, 2.26%)</title><rect x="1004.3" y="1093" width="26.6" height="15.0" fill="rgb(252,170,44)" rx="2" ry="2" />
+<text  x="1007.29" y="1103.5" >I..</text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="680.9" y="629" width="0.8" height="15.0" fill="rgb(221,187,47)" rx="2" ry="2" />
+<text  x="683.86" y="639.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE:CREATE-SCANNER (T)) (80 samples, 3.01%)</title><rect x="1042.5" y="1381" width="35.5" height="15.0" fill="rgb(226,99,43)" rx="2" ry="2" />
+<text  x="1045.50" y="1391.5" >(SB..</text>
+</g>
+<g >
+<title>OPEN (4 samples, 0.15%)</title><rect x="779.5" y="229" width="1.8" height="15.0" fill="rgb(232,112,46)" rx="2" ry="2" />
+<text  x="782.49" y="239.5" ></text>
+</g>
+<g >
+<title>GET-FILE-STAMP (19 samples, 0.72%)</title><rect x="911.4" y="1493" width="8.5" height="15.0" fill="rgb(211,64,15)" rx="2" ry="2" />
+<text  x="914.44" y="1503.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MACROEXPAND-PROGRESS (2,342 samples, 88.18%)</title><rect x="118.8" y="1845" width="1040.5" height="15.0" fill="rgb(235,61,35)" rx="2" ry="2" />
+<text  x="121.85" y="1855.5" >CALL-WITH-MACROEXPAND-PROGRESS</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (863 samples, 32.49%)</title><rect x="417.4" y="1573" width="383.4" height="15.0" fill="rgb(211,216,4)" rx="2" ry="2" />
+<text  x="420.40" y="1583.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (6 samples, 0.23%)</title><rect x="1083.8" y="1205" width="2.7" height="15.0" fill="rgb(244,54,46)" rx="2" ry="2" />
+<text  x="1086.82" y="1215.5" ></text>
+</g>
+<g >
+<title>WALK-FORM-INTERNAL (35 samples, 1.32%)</title><rect x="1062.5" y="1125" width="15.5" height="15.0" fill="rgb(240,147,0)" rx="2" ry="2" />
+<text  x="1065.49" y="1135.5" ></text>
+</g>
+<g >
+<title>(FLET SB-THREAD::WITH-RECURSIVE-LOCK-THUNK :IN SB-PCL::INSTALL-OPTIMIZED-CONSTRUCTOR) (16 samples, 0.60%)</title><rect x="1049.2" y="1173" width="7.1" height="15.0" fill="rgb(213,14,7)" rx="2" ry="2" />
+<text  x="1052.16" y="1183.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN SB-WALKER::WALK-FORM-INTERNAL) (27 samples, 1.02%)</title><rect x="1066.0" y="997" width="12.0" height="15.0" fill="rgb(238,119,25)" rx="2" ry="2" />
+<text  x="1069.05" y="1007.5" ></text>
+</g>
+<g >
+<title>UNIX-REALPATH (3 samples, 0.11%)</title><rect x="652.4" y="917" width="1.4" height="15.0" fill="rgb(237,101,24)" rx="2" ry="2" />
+<text  x="655.42" y="927.5" ></text>
+</g>
+<g >
+<title>LOAD-AS-FASL (342 samples, 12.88%)</title><rect x="974.5" y="1445" width="152.0" height="15.0" fill="rgb(220,67,46)" rx="2" ry="2" />
+<text  x="977.53" y="1455.5" >LOAD-AS-FASL</text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (21 samples, 0.79%)</title><rect x="1021.6" y="469" width="9.3" height="15.0" fill="rgb(222,156,3)" rx="2" ry="2" />
+<text  x="1024.62" y="479.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA (66 samples, 2.48%)</title><rect x="1001.6" y="1189" width="29.3" height="15.0" fill="rgb(214,102,0)" rx="2" ry="2" />
+<text  x="1004.63" y="1199.5" >IR..</text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="594.2" y="725" width="2.2" height="15.0" fill="rgb(250,219,40)" rx="2" ry="2" />
+<text  x="597.22" y="735.5" ></text>
+</g>
+<g >
+<title>UNIX-REALPATH (3 samples, 0.11%)</title><rect x="446.3" y="1365" width="1.3" height="15.0" fill="rgb(217,166,23)" rx="2" ry="2" />
+<text  x="449.28" y="1375.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AROUND (T)) (19 samples, 0.72%)</title><rect x="766.2" y="325" width="8.4" height="15.0" fill="rgb(252,148,51)" rx="2" ry="2" />
+<text  x="769.16" y="335.5" ></text>
+</g>
+<g >
+<title>RESOLVE-DEPENDENCY-NAME (41 samples, 1.54%)</title><rect x="669.3" y="981" width="18.2" height="15.0" fill="rgb(205,226,12)" rx="2" ry="2" />
+<text  x="672.31" y="991.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (849 samples, 31.97%)</title><rect x="423.6" y="1557" width="377.2" height="15.0" fill="rgb(223,49,32)" rx="2" ry="2" />
+<text  x="426.62" y="1567.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>IR1-CONVERT-COMBINATION (8 samples, 0.30%)</title><rect x="1186.4" y="837" width="3.6" height="15.0" fill="rgb(247,110,51)" rx="2" ry="2" />
+<text  x="1189.45" y="847.5" ></text>
+</g>
+<g >
+<title>NET-CONSTANT-CONVERTER (19 samples, 0.72%)</title><rect x="1069.6" y="869" width="8.4" height="15.0" fill="rgb(246,171,39)" rx="2" ry="2" />
+<text  x="1072.60" y="879.5" ></text>
+</g>
+<g >
+<title>TARGET-MAIN.LISP&quot;) (12 samples, 0.45%)</title><rect x="1050.9" y="1077" width="5.4" height="15.0" fill="rgb(223,144,53)" rx="2" ry="2" />
+<text  x="1053.94" y="1087.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (16 samples, 0.60%)</title><rect x="859.9" y="1557" width="7.1" height="15.0" fill="rgb(216,56,20)" rx="2" ry="2" />
+<text  x="862.90" y="1567.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (11 samples, 0.41%)</title><rect x="1073.2" y="741" width="4.8" height="15.0" fill="rgb(233,87,10)" rx="2" ry="2" />
+<text  x="1076.16" y="751.5" ></text>
+</g>
+<g >
+<title>foreign function fstat$INODE64 (1 samples, 0.04%)</title><rect x="601.3" y="869" width="0.5" height="15.0" fill="rgb(253,207,4)" rx="2" ry="2" />
+<text  x="604.33" y="879.5" ></text>
+</g>
+<g >
+<title>FIND-THING-NAMED (9 samples, 0.34%)</title><rect x="1155.3" y="1509" width="4.0" height="15.0" fill="rgb(213,132,26)" rx="2" ry="2" />
+<text  x="1158.35" y="1519.5" ></text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (4 samples, 0.15%)</title><rect x="1093.6" y="1381" width="1.8" height="15.0" fill="rgb(242,162,27)" rx="2" ry="2" />
+<text  x="1096.59" y="1391.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (1 samples, 0.04%)</title><rect x="1108.3" y="1349" width="0.4" height="15.0" fill="rgb(254,14,35)" rx="2" ry="2" />
+<text  x="1111.25" y="1359.5" ></text>
+</g>
+<g >
+<title>ALLOCATE-CODE-OBJECT (20 samples, 0.75%)</title><rect x="1098.0" y="1397" width="8.9" height="15.0" fill="rgb(238,82,51)" rx="2" ry="2" />
+<text  x="1101.03" y="1407.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-LOAD-BINDINGS (32 samples, 1.20%)</title><rect x="585.8" y="901" width="14.2" height="15.0" fill="rgb(223,44,31)" rx="2" ry="2" />
+<text  x="588.78" y="911.5" ></text>
+</g>
+<g >
+<title>FILE-POSITION (3 samples, 0.11%)</title><rect x="773.3" y="69" width="1.3" height="15.0" fill="rgb(218,82,29)" rx="2" ry="2" />
+<text  x="776.27" y="79.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:NEEDED-IN-IMAGE-P (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (11 samples, 0.41%)</title><rect x="791.0" y="293" width="4.9" height="15.0" fill="rgb(243,53,53)" rx="2" ry="2" />
+<text  x="794.04" y="303.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (4 samples, 0.15%)</title><rect x="865.2" y="1365" width="1.8" height="15.0" fill="rgb(248,147,39)" rx="2" ry="2" />
+<text  x="868.23" y="1375.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (16 samples, 0.60%)</title><rect x="674.6" y="853" width="7.1" height="15.0" fill="rgb(213,157,30)" rx="2" ry="2" />
+<text  x="677.64" y="863.5" ></text>
+</g>
+<g >
+<title>(FLET ASDF/SYSTEM-REGISTRY::TRY :IN ASDF/SYSTEM-REGISTRY:SEARCH-FOR-SYSTEM-DEFINITION) (12 samples, 0.45%)</title><rect x="775.9" y="357" width="5.4" height="15.0" fill="rgb(219,82,18)" rx="2" ry="2" />
+<text  x="778.93" y="367.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AROUND (T)) (71 samples, 2.67%)</title><rect x="570.2" y="1093" width="31.6" height="15.0" fill="rgb(242,92,29)" rx="2" ry="2" />
+<text  x="573.23" y="1103.5" >(S..</text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (6 samples, 0.23%)</title><rect x="1092.7" y="1397" width="2.7" height="15.0" fill="rgb(238,118,21)" rx="2" ry="2" />
+<text  x="1095.70" y="1407.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (59 samples, 2.22%)</title><rect x="1004.7" y="1077" width="26.2" height="15.0" fill="rgb(210,42,30)" rx="2" ry="2" />
+<text  x="1007.74" y="1087.5" >I..</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (905 samples, 34.07%)</title><rect x="398.7" y="1621" width="402.1" height="15.0" fill="rgb(246,12,26)" rx="2" ry="2" />
+<text  x="401.74" y="1631.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (56 samples, 2.11%)</title><rect x="576.9" y="1013" width="24.9" height="15.0" fill="rgb(233,96,15)" rx="2" ry="2" />
+<text  x="579.90" y="1023.5" >(..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOAD-ASD) (24 samples, 0.90%)</title><rect x="763.9" y="405" width="10.7" height="15.0" fill="rgb(217,42,11)" rx="2" ry="2" />
+<text  x="766.94" y="415.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (18 samples, 0.68%)</title><rect x="1151.3" y="1653" width="8.0" height="15.0" fill="rgb(247,2,50)" rx="2" ry="2" />
+<text  x="1154.35" y="1663.5" ></text>
+</g>
+<g >
+<title>LOOKUP (6 samples, 0.23%)</title><rect x="606.7" y="997" width="2.6" height="15.0" fill="rgb(238,160,48)" rx="2" ry="2" />
+<text  x="609.66" y="1007.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOCATE-SYSTEM) (13 samples, 0.49%)</title><rect x="681.7" y="917" width="5.8" height="15.0" fill="rgb(221,83,42)" rx="2" ry="2" />
+<text  x="684.75" y="927.5" ></text>
+</g>
+<g >
+<title>INTERN (7 samples, 0.26%)</title><rect x="1037.6" y="1381" width="3.1" height="15.0" fill="rgb(241,14,54)" rx="2" ry="2" />
+<text  x="1040.61" y="1391.5" ></text>
+</g>
+<g >
+<title>foreign function fstat$INODE64 (1 samples, 0.04%)</title><rect x="780.8" y="181" width="0.5" height="15.0" fill="rgb(207,202,54)" rx="2" ry="2" />
+<text  x="783.82" y="191.5" ></text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (8 samples, 0.30%)</title><rect x="797.3" y="245" width="3.5" height="15.0" fill="rgb(223,22,46)" rx="2" ry="2" />
+<text  x="800.26" y="255.5" ></text>
+</g>
+<g >
+<title>WALK-REPEAT-EVAL (30 samples, 1.13%)</title><rect x="1064.7" y="1045" width="13.3" height="15.0" fill="rgb(242,15,20)" rx="2" ry="2" />
+<text  x="1067.71" y="1055.5" ></text>
+</g>
+<g >
+<title>WALK-REPEAT-EVAL (36 samples, 1.36%)</title><rect x="1062.0" y="1141" width="16.0" height="15.0" fill="rgb(206,173,5)" rx="2" ry="2" />
+<text  x="1065.05" y="1151.5" ></text>
+</g>
+<g >
+<title>FIND-BLOCK-TYPE-CONSTRAINTS (5 samples, 0.19%)</title><rect x="1054.1" y="965" width="2.2" height="15.0" fill="rgb(223,37,23)" rx="2" ry="2" />
+<text  x="1057.05" y="975.5" ></text>
+</g>
+<g >
+<title>COMPILE-IN-LEXENV (71 samples, 2.67%)</title><rect x="999.4" y="1301" width="31.5" height="15.0" fill="rgb(254,94,43)" rx="2" ry="2" />
+<text  x="1002.41" y="1311.5" >CO..</text>
+</g>
+<g >
+<title>%COMPILE-COMPONENT (8 samples, 0.30%)</title><rect x="1122.9" y="1189" width="3.6" height="15.0" fill="rgb(228,47,24)" rx="2" ry="2" />
+<text  x="1125.91" y="1199.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="799.5" y="165" width="1.3" height="15.0" fill="rgb(229,181,54)" rx="2" ry="2" />
+<text  x="802.48" y="175.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (13 samples, 0.49%)</title><rect x="676.0" y="805" width="5.7" height="15.0" fill="rgb(250,9,6)" rx="2" ry="2" />
+<text  x="678.97" y="815.5" ></text>
+</g>
+<g >
+<title>LOOKUP (6 samples, 0.23%)</title><rect x="778.6" y="261" width="2.7" height="15.0" fill="rgb(212,135,16)" rx="2" ry="2" />
+<text  x="781.60" y="271.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (147 samples, 5.53%)</title><rect x="735.5" y="693" width="65.3" height="15.0" fill="rgb(226,173,52)" rx="2" ry="2" />
+<text  x="738.50" y="703.5" >(LAMBDA..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOAD-ASD) (106 samples, 3.99%)</title><rect x="554.7" y="1173" width="47.1" height="15.0" fill="rgb(213,173,38)" rx="2" ry="2" />
+<text  x="557.68" y="1183.5" >(LAM..</text>
+</g>
+<g >
+<title>(FLET SB-PCL::DO-IF :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (2 samples, 0.08%)</title><rect x="1085.6" y="1141" width="0.9" height="15.0" fill="rgb(219,215,25)" rx="2" ry="2" />
+<text  x="1088.59" y="1151.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-IMPL-UTIL::%CALL-WITH-QUIET-COMPILATION (T T)) (2,509 samples, 94.47%)</title><rect x="75.3" y="1877" width="1114.7" height="15.0" fill="rgb(239,154,2)" rx="2" ry="2" />
+<text  x="78.31" y="1887.5" >(SB-PCL::FAST-METHOD QL-IMPL-UTIL::%CALL-WITH-QUIET-COMPILATION (T T))</text>
+</g>
+<g >
+<title>(FLET SB-FASL::THUNK :IN LOAD) (7 samples, 0.26%)</title><rect x="863.9" y="1413" width="3.1" height="15.0" fill="rgb(247,196,4)" rx="2" ry="2" />
+<text  x="866.90" y="1423.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :ALTERNATION) T)) (24 samples, 0.90%)</title><rect x="1045.6" y="1301" width="10.7" height="15.0" fill="rgb(230,211,35)" rx="2" ry="2" />
+<text  x="1048.61" y="1311.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (20 samples, 0.75%)</title><rect x="1022.1" y="453" width="8.8" height="15.0" fill="rgb(249,112,30)" rx="2" ry="2" />
+<text  x="1025.06" y="463.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (2,246 samples, 84.56%)</title><rect x="161.5" y="1813" width="997.8" height="15.0" fill="rgb(229,161,12)" rx="2" ry="2" />
+<text  x="164.50" y="1823.5" >(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T))</text>
+</g>
+<g >
+<title>MAYBE-SKIP-SHEBANG-LINE (6 samples, 0.23%)</title><rect x="1127.4" y="1461" width="2.6" height="15.0" fill="rgb(237,51,28)" rx="2" ry="2" />
+<text  x="1130.36" y="1471.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (25 samples, 0.94%)</title><rect x="706.6" y="805" width="11.1" height="15.0" fill="rgb(239,88,53)" rx="2" ry="2" />
+<text  x="709.63" y="815.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM (T)) (9 samples, 0.34%)</title><rect x="777.3" y="309" width="4.0" height="15.0" fill="rgb(252,128,9)" rx="2" ry="2" />
+<text  x="780.27" y="319.5" ></text>
+</g>
+<g >
+<title>SYSTEM-DEFINITION-SEARCHER (11 samples, 0.41%)</title><rect x="776.4" y="341" width="4.9" height="15.0" fill="rgb(213,198,54)" rx="2" ry="2" />
+<text  x="779.38" y="351.5" ></text>
+</g>
+<g >
+<title>CODE (6 samples, 0.23%)</title><rect x="993.6" y="1349" width="2.7" height="15.0" fill="rgb(210,39,21)" rx="2" ry="2" />
+<text  x="996.63" y="1359.5" ></text>
+</g>
+<g >
+<title>LOAD (38 samples, 1.43%)</title><rect x="1173.1" y="1349" width="16.9" height="15.0" fill="rgb(224,172,2)" rx="2" ry="2" />
+<text  x="1176.12" y="1359.5" ></text>
+</g>
+<g >
+<title>WALK-FORM-INTERNAL (42 samples, 1.58%)</title><rect x="1059.4" y="1237" width="18.6" height="15.0" fill="rgb(212,26,8)" rx="2" ry="2" />
+<text  x="1062.38" y="1247.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (3 samples, 0.11%)</title><rect x="865.7" y="1349" width="1.3" height="15.0" fill="rgb(209,55,44)" rx="2" ry="2" />
+<text  x="868.68" y="1359.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (1,842 samples, 69.35%)</title><rect x="329.9" y="1685" width="818.3" height="15.0" fill="rgb(224,26,28)" rx="2" ry="2" />
+<text  x="332.88" y="1695.5" >(LAMBDA NIL :IN ASDF/OPERATE:OPERATE)</text>
+</g>
+<g >
+<title>%MAP-FOR-EFFECT-ARITY-1 (15 samples, 0.56%)</title><rect x="602.7" y="1141" width="6.6" height="15.0" fill="rgb(212,138,46)" rx="2" ry="2" />
+<text  x="605.67" y="1151.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;LAMBDA0&quot; :IN &quot;SYS:SRC (10 samples, 0.38%)</title><rect x="1073.6" y="725" width="4.4" height="15.0" fill="rgb(220,219,51)" rx="2" ry="2" />
+<text  x="1076.60" y="735.5" ></text>
+</g>
+<g >
+<title>MAKE-EFFECTIVE-METHOD-FUNCTION-INTERNAL (16 samples, 0.60%)</title><rect x="1070.9" y="821" width="7.1" height="15.0" fill="rgb(245,55,21)" rx="2" ry="2" />
+<text  x="1073.93" y="831.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (32 samples, 1.20%)</title><rect x="1016.7" y="645" width="14.2" height="15.0" fill="rgb(211,123,3)" rx="2" ry="2" />
+<text  x="1019.73" y="655.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (14 samples, 0.53%)</title><rect x="711.5" y="629" width="6.2" height="15.0" fill="rgb(242,196,1)" rx="2" ry="2" />
+<text  x="714.51" y="639.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-LOAD-BINDINGS (384 samples, 14.46%)</title><rect x="955.9" y="1477" width="170.6" height="15.0" fill="rgb(214,75,36)" rx="2" ry="2" />
+<text  x="958.87" y="1487.5" >CALL-WITH-LOAD-BINDINGS</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (303 samples, 11.41%)</title><rect x="666.2" y="997" width="134.6" height="15.0" fill="rgb(254,141,50)" rx="2" ry="2" />
+<text  x="669.20" y="1007.5" >MAP-DIRECT-DEPEND..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (61 samples, 2.30%)</title><rect x="1162.9" y="1717" width="27.1" height="15.0" fill="rgb(246,64,28)" rx="2" ry="2" />
+<text  x="1165.90" y="1727.5" >(..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (12 samples, 0.45%)</title><rect x="564.9" y="1045" width="5.3" height="15.0" fill="rgb(252,124,45)" rx="2" ry="2" />
+<text  x="567.90" y="1055.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (10 samples, 0.38%)</title><rect x="677.3" y="757" width="4.4" height="15.0" fill="rgb(251,139,40)" rx="2" ry="2" />
+<text  x="680.30" y="767.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (3 samples, 0.11%)</title><rect x="1039.4" y="1317" width="1.3" height="15.0" fill="rgb(244,35,13)" rx="2" ry="2" />
+<text  x="1042.39" y="1327.5" ></text>
+</g>
+<g >
+<title>(LABELS QUICKLISP-CLIENT::RECURSE :IN QUICKLISP-CLIENT::COMPUTE-LOAD-STRATEGY) (67 samples, 2.52%)</title><rect x="1160.2" y="1813" width="29.8" height="15.0" fill="rgb(208,31,48)" rx="2" ry="2" />
+<text  x="1163.23" y="1823.5" >(L..</text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="795.0" y="149" width="0.9" height="15.0" fill="rgb(213,3,10)" rx="2" ry="2" />
+<text  x="798.04" y="159.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (44 samples, 1.66%)</title><rect x="1011.4" y="837" width="19.5" height="15.0" fill="rgb(232,28,27)" rx="2" ry="2" />
+<text  x="1014.40" y="847.5" ></text>
+</g>
+<g >
+<title>ADD-SYMBOL (1 samples, 0.04%)</title><rect x="1037.2" y="1221" width="0.4" height="15.0" fill="rgb(250,51,16)" rx="2" ry="2" />
+<text  x="1040.17" y="1231.5" ></text>
+</g>
+<g >
+<title>COMPUTE-LOAD-STRATEGY (69 samples, 2.60%)</title><rect x="1159.3" y="1845" width="30.7" height="15.0" fill="rgb(230,81,44)" rx="2" ry="2" />
+<text  x="1162.34" y="1855.5" >CO..</text>
+</g>
+<g >
+<title>LOAD-SYSTEM (2,294 samples, 86.37%)</title><rect x="140.2" y="1829" width="1019.1" height="15.0" fill="rgb(206,43,5)" rx="2" ry="2" />
+<text  x="143.17" y="1839.5" >LOAD-SYSTEM</text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA (21 samples, 0.79%)</title><rect x="1180.7" y="1045" width="9.3" height="15.0" fill="rgb(224,91,5)" rx="2" ry="2" />
+<text  x="1183.67" y="1055.5" ></text>
+</g>
+<g >
+<title>COMPUTE-ACTION-STATUS (12 samples, 0.45%)</title><rect x="648.4" y="1061" width="5.4" height="15.0" fill="rgb(247,132,41)" rx="2" ry="2" />
+<text  x="651.43" y="1071.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM (T)) (7 samples, 0.26%)</title><rect x="684.4" y="821" width="3.1" height="15.0" fill="rgb(210,136,19)" rx="2" ry="2" />
+<text  x="687.41" y="831.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (13 samples, 0.49%)</title><rect x="914.1" y="1445" width="5.8" height="15.0" fill="rgb(236,4,48)" rx="2" ry="2" />
+<text  x="917.10" y="1455.5" ></text>
+</g>
+<g >
+<title>LOAD-FASL-GROUP (5 samples, 0.19%)</title><rect x="864.8" y="1381" width="2.2" height="15.0" fill="rgb(253,168,23)" rx="2" ry="2" />
+<text  x="867.79" y="1391.5" ></text>
+</g>
+<g >
+<title>USE-DISPATCH-DFUN-P (11 samples, 0.41%)</title><rect x="1081.6" y="1285" width="4.9" height="15.0" fill="rgb(253,13,49)" rx="2" ry="2" />
+<text  x="1084.60" y="1295.5" ></text>
+</g>
+<g >
+<title>RELEASE-FD-STREAM-RESOURCES (2 samples, 0.08%)</title><rect x="608.4" y="933" width="0.9" height="15.0" fill="rgb(224,96,13)" rx="2" ry="2" />
+<text  x="611.44" y="943.5" ></text>
+</g>
+<g >
+<title>UNIX-REALPATH (3 samples, 0.11%)</title><rect x="1142.9" y="1429" width="1.3" height="15.0" fill="rgb(207,101,23)" rx="2" ry="2" />
+<text  x="1145.91" y="1439.5" ></text>
+</g>
+<g >
+<title>FD-TYPE (4 samples, 0.15%)</title><rect x="1134.5" y="1461" width="1.7" height="15.0" fill="rgb(226,25,10)" rx="2" ry="2" />
+<text  x="1137.47" y="1471.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (90 samples, 3.39%)</title><rect x="561.8" y="1109" width="40.0" height="15.0" fill="rgb(208,109,36)" rx="2" ry="2" />
+<text  x="564.79" y="1119.5" >(SB..</text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (2 samples, 0.08%)</title><rect x="1094.5" y="1365" width="0.9" height="15.0" fill="rgb(254,25,17)" rx="2" ry="2" />
+<text  x="1097.48" y="1375.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (749 samples, 28.20%)</title><rect x="815.5" y="1621" width="332.7" height="15.0" fill="rgb(213,82,24)" rx="2" ry="2" />
+<text  x="818.47" y="1631.5" >(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATI..</text>
+</g>
+<g >
+<title>(FLET SB-FASL::SCAN :IN SB-FASL::FASL-HEADER-P) (7 samples, 0.26%)</title><rect x="1126.9" y="1477" width="3.1" height="15.0" fill="rgb(244,200,44)" rx="2" ry="2" />
+<text  x="1129.91" y="1487.5" ></text>
+</g>
+<g >
+<title>SYSTEM-DEFINITION-SEARCHER (13 samples, 0.49%)</title><rect x="603.6" y="1109" width="5.7" height="15.0" fill="rgb(233,125,3)" rx="2" ry="2" />
+<text  x="606.55" y="1119.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;THUNK&quot; :IN ASDF/ACTION:PERFORM) (11 samples, 0.41%)</title><rect x="712.8" y="581" width="4.9" height="15.0" fill="rgb(238,6,30)" rx="2" ry="2" />
+<text  x="715.85" y="591.5" ></text>
+</g>
+<g >
+<title>GET-NEW-FUN-GENERATOR (14 samples, 0.53%)</title><rect x="1071.8" y="789" width="6.2" height="15.0" fill="rgb(208,143,5)" rx="2" ry="2" />
+<text  x="1074.82" y="799.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (138 samples, 5.20%)</title><rect x="548.0" y="1221" width="61.3" height="15.0" fill="rgb(245,17,25)" rx="2" ry="2" />
+<text  x="551.02" y="1231.5" >(SB-PC..</text>
+</g>
+<g >
+<title>APPLY-OUTPUT-TRANSLATIONS (8 samples, 0.30%)</title><rect x="792.4" y="245" width="3.5" height="15.0" fill="rgb(205,60,50)" rx="2" ry="2" />
+<text  x="795.37" y="255.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :GREEDY-REPETITION) T)) (22 samples, 0.83%)</title><rect x="1046.5" y="1269" width="9.8" height="15.0" fill="rgb(238,193,31)" rx="2" ry="2" />
+<text  x="1049.50" y="1279.5" ></text>
+</g>
+<g >
+<title>PACK-TN (4 samples, 0.15%)</title><rect x="1076.3" y="597" width="1.7" height="15.0" fill="rgb(243,225,35)" rx="2" ry="2" />
+<text  x="1079.27" y="607.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM (ASDF/FIND-SYSTEM:DEFINE-OP ASDF/SYSTEM:SYSTEM)) (13 samples, 0.49%)</title><rect x="768.8" y="229" width="5.8" height="15.0" fill="rgb(225,114,27)" rx="2" ry="2" />
+<text  x="771.83" y="239.5" ></text>
+</g>
+<g >
+<title>FIND-ASDF-SYSTEM-FILE (12 samples, 0.45%)</title><rect x="604.0" y="1093" width="5.3" height="15.0" fill="rgb(243,19,0)" rx="2" ry="2" />
+<text  x="607.00" y="1103.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (23 samples, 0.87%)</title><rect x="707.5" y="773" width="10.2" height="15.0" fill="rgb(232,144,34)" rx="2" ry="2" />
+<text  x="710.52" y="783.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-7&quot; :IN SB-IMPL::REFILL-INPUT-BUFFER) (1 samples, 0.04%)</title><rect x="717.3" y="421" width="0.4" height="15.0" fill="rgb(216,208,47)" rx="2" ry="2" />
+<text  x="720.29" y="431.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (717 samples, 27.00%)</title><rect x="482.3" y="1413" width="318.5" height="15.0" fill="rgb(217,189,1)" rx="2" ry="2" />
+<text  x="485.27" y="1423.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VIS..</text>
+</g>
+<g >
+<title>IR1-CONVERT (4 samples, 0.15%)</title><rect x="1029.2" y="197" width="1.7" height="15.0" fill="rgb(217,35,16)" rx="2" ry="2" />
+<text  x="1032.17" y="207.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="569.3" y="885" width="0.9" height="15.0" fill="rgb(238,75,17)" rx="2" ry="2" />
+<text  x="572.34" y="895.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="1157.6" y="1429" width="1.7" height="15.0" fill="rgb(212,77,22)" rx="2" ry="2" />
+<text  x="1160.57" y="1439.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="794.1" y="181" width="1.8" height="15.0" fill="rgb(221,178,28)" rx="2" ry="2" />
+<text  x="797.15" y="191.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (26 samples, 0.98%)</title><rect x="1019.4" y="549" width="11.5" height="15.0" fill="rgb(248,151,47)" rx="2" ry="2" />
+<text  x="1022.40" y="559.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (4 samples, 0.15%)</title><rect x="716.0" y="469" width="1.7" height="15.0" fill="rgb(244,63,34)" rx="2" ry="2" />
+<text  x="718.96" y="479.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (18 samples, 0.68%)</title><rect x="1023.0" y="421" width="7.9" height="15.0" fill="rgb(206,67,42)" rx="2" ry="2" />
+<text  x="1025.95" y="431.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (23 samples, 0.87%)</title><rect x="1020.7" y="501" width="10.2" height="15.0" fill="rgb(230,18,8)" rx="2" ry="2" />
+<text  x="1023.73" y="511.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (35 samples, 1.32%)</title><rect x="672.0" y="933" width="15.5" height="15.0" fill="rgb(241,145,20)" rx="2" ry="2" />
+<text  x="674.97" y="943.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (31 samples, 1.17%)</title><rect x="1017.2" y="629" width="13.7" height="15.0" fill="rgb(238,167,21)" rx="2" ry="2" />
+<text  x="1020.18" y="639.5" ></text>
+</g>
+<g >
+<title>THE-IN-POLICY (5 samples, 0.19%)</title><rect x="1187.8" y="789" width="2.2" height="15.0" fill="rgb(237,94,13)" rx="2" ry="2" />
+<text  x="1190.78" y="799.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (835 samples, 31.44%)</title><rect x="429.8" y="1541" width="371.0" height="15.0" fill="rgb(246,211,22)" rx="2" ry="2" />
+<text  x="432.84" y="1551.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-AC..</text>
+</g>
+<g >
+<title>COMPILE-IN-LEXENV (14 samples, 0.53%)</title><rect x="1050.1" y="1141" width="6.2" height="15.0" fill="rgb(216,227,31)" rx="2" ry="2" />
+<text  x="1053.05" y="1151.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-4&quot; :IN SB-IMPL::FD-STREAM-GET-FILE-POSITION) (1 samples, 0.04%)</title><rect x="774.2" y="37" width="0.4" height="15.0" fill="rgb(226,137,6)" rx="2" ry="2" />
+<text  x="777.16" y="47.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/ACTION:PERFORM) (14 samples, 0.53%)</title><rect x="768.4" y="245" width="6.2" height="15.0" fill="rgb(240,97,17)" rx="2" ry="2" />
+<text  x="771.38" y="255.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (11 samples, 0.41%)</title><rect x="648.9" y="1045" width="4.9" height="15.0" fill="rgb(207,217,38)" rx="2" ry="2" />
+<text  x="651.87" y="1055.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (15 samples, 0.56%)</title><rect x="913.2" y="1461" width="6.7" height="15.0" fill="rgb(208,100,43)" rx="2" ry="2" />
+<text  x="916.22" y="1471.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (11 samples, 0.41%)</title><rect x="1026.1" y="309" width="4.8" height="15.0" fill="rgb(208,39,26)" rx="2" ry="2" />
+<text  x="1029.06" y="319.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (391 samples, 14.72%)</title><rect x="627.1" y="1157" width="173.7" height="15.0" fill="rgb(221,112,30)" rx="2" ry="2" />
+<text  x="630.10" y="1167.5" >(LAMBDA NIL :IN ASDF/A..</text>
+</g>
+<g >
+<title>LOAD (10 samples, 0.38%)</title><rect x="862.6" y="1461" width="4.4" height="15.0" fill="rgb(205,52,52)" rx="2" ry="2" />
+<text  x="865.57" y="1471.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MUFFLED-CONDITIONS (39 samples, 1.47%)</title><rect x="1172.7" y="1365" width="17.3" height="15.0" fill="rgb(243,74,13)" rx="2" ry="2" />
+<text  x="1175.67" y="1375.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (SYMBOL T)) (20 samples, 0.75%)</title><rect x="1150.5" y="1685" width="8.8" height="15.0" fill="rgb(225,77,1)" rx="2" ry="2" />
+<text  x="1153.46" y="1695.5" ></text>
+</g>
+<g >
+<title>(LABELS SB-FASL::READ-SYMBOL-NAME :IN &quot;SYS:SRC (6 samples, 0.23%)</title><rect x="993.6" y="1365" width="2.7" height="15.0" fill="rgb(227,180,34)" rx="2" ry="2" />
+<text  x="996.63" y="1375.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (40 samples, 1.51%)</title><rect x="783.0" y="437" width="17.8" height="15.0" fill="rgb(236,125,37)" rx="2" ry="2" />
+<text  x="786.04" y="447.5" ></text>
+</g>
+<g >
+<title>FD-TYPE (2 samples, 0.08%)</title><rect x="780.4" y="197" width="0.9" height="15.0" fill="rgb(222,133,28)" rx="2" ry="2" />
+<text  x="783.38" y="207.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-PACKAGE-GRAPH (5 samples, 0.19%)</title><rect x="1035.4" y="1285" width="2.2" height="15.0" fill="rgb(227,203,11)" rx="2" ry="2" />
+<text  x="1038.39" y="1295.5" ></text>
+</g>
+<g >
+<title>WALK-DECLARATIONS (38 samples, 1.43%)</title><rect x="1061.2" y="1173" width="16.8" height="15.0" fill="rgb(213,30,46)" rx="2" ry="2" />
+<text  x="1064.16" y="1183.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOAD-ASD) (20 samples, 0.75%)</title><rect x="672.9" y="917" width="8.8" height="15.0" fill="rgb(241,143,48)" rx="2" ry="2" />
+<text  x="675.86" y="927.5" ></text>
+</g>
+<g >
+<title>%COMPILE (23 samples, 0.87%)</title><rect x="1179.8" y="1077" width="10.2" height="15.0" fill="rgb(249,177,54)" rx="2" ry="2" />
+<text  x="1182.78" y="1087.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (782 samples, 29.44%)</title><rect x="453.4" y="1493" width="347.4" height="15.0" fill="rgb(216,97,7)" rx="2" ry="2" />
+<text  x="456.39" y="1503.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (310 samples, 11.67%)</title><rect x="663.1" y="1013" width="137.7" height="15.0" fill="rgb(236,170,2)" rx="2" ry="2" />
+<text  x="666.09" y="1023.5" >(LAMBDA NIL :IN A..</text>
+</g>
+<g >
+<title>SEARCH-FOR-SYSTEM-DEFINITION (15 samples, 0.56%)</title><rect x="1152.7" y="1605" width="6.6" height="15.0" fill="rgb(242,149,43)" rx="2" ry="2" />
+<text  x="1155.68" y="1615.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (57 samples, 2.15%)</title><rect x="1164.7" y="1653" width="25.3" height="15.0" fill="rgb(225,198,15)" rx="2" ry="2" />
+<text  x="1167.68" y="1663.5" >(..</text>
+</g>
+<g >
+<title>%LOOKUP (5 samples, 0.19%)</title><rect x="607.1" y="981" width="2.2" height="15.0" fill="rgb(238,173,38)" rx="2" ry="2" />
+<text  x="610.11" y="991.5" ></text>
+</g>
+<g >
+<title>(FLET SB-IMPL::THUNK :IN EXPORT) (7 samples, 0.26%)</title><rect x="1034.5" y="1317" width="3.1" height="15.0" fill="rgb(215,55,18)" rx="2" ry="2" />
+<text  x="1037.50" y="1327.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MUFFLED-CONDITIONS (10 samples, 0.38%)</title><rect x="770.2" y="181" width="4.4" height="15.0" fill="rgb(249,110,49)" rx="2" ry="2" />
+<text  x="773.16" y="191.5" ></text>
+</g>
+<g >
+<title>foreign function sb_realpath (2 samples, 0.08%)</title><rect x="1143.4" y="1413" width="0.8" height="15.0" fill="rgb(222,79,53)" rx="2" ry="2" />
+<text  x="1146.35" y="1423.5" ></text>
+</g>
+<g >
+<title>LOAD-AS-SOURCE (28 samples, 1.05%)</title><rect x="587.6" y="869" width="12.4" height="15.0" fill="rgb(228,36,1)" rx="2" ry="2" />
+<text  x="590.56" y="879.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS :AROUND (T T)) (683 samples, 25.72%)</title><rect x="844.8" y="1589" width="303.4" height="15.0" fill="rgb(249,59,41)" rx="2" ry="2" />
+<text  x="847.80" y="1599.5" >(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM..</text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="445.8" y="1381" width="1.8" height="15.0" fill="rgb(230,97,54)" rx="2" ry="2" />
+<text  x="448.84" y="1391.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (119 samples, 4.48%)</title><rect x="747.9" y="581" width="52.9" height="15.0" fill="rgb(250,13,49)" rx="2" ry="2" />
+<text  x="750.94" y="591.5" >(LAMB..</text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (4 samples, 0.15%)</title><rect x="1146.0" y="1413" width="1.8" height="15.0" fill="rgb(231,170,40)" rx="2" ry="2" />
+<text  x="1149.02" y="1423.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS :AROUND (T T)) (45 samples, 1.69%)</title><rect x="1170.0" y="1461" width="20.0" height="15.0" fill="rgb(238,155,39)" rx="2" ry="2" />
+<text  x="1173.01" y="1471.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (18 samples, 0.68%)</title><rect x="766.6" y="309" width="8.0" height="15.0" fill="rgb(237,125,16)" rx="2" ry="2" />
+<text  x="769.60" y="319.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (8 samples, 0.30%)</title><rect x="1027.4" y="261" width="3.5" height="15.0" fill="rgb(207,95,18)" rx="2" ry="2" />
+<text  x="1030.39" y="271.5" ></text>
+</g>
+<g >
+<title>ALLOCATE-IMMOBILE-OBJ (15 samples, 0.56%)</title><rect x="1100.3" y="1381" width="6.6" height="15.0" fill="rgb(254,40,31)" rx="2" ry="2" />
+<text  x="1103.26" y="1391.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;THUNK&quot; :IN ASDF/ACTION:PERFORM) (47 samples, 1.77%)</title><rect x="580.9" y="965" width="20.9" height="15.0" fill="rgb(223,71,51)" rx="2" ry="2" />
+<text  x="583.90" y="975.5" ></text>
+</g>
+<g >
+<title>(FLET SB-THREAD::WITH-RECURSIVE-LOCK-THUNK :IN SB-PCL::INSTALL-OPTIMIZED-CONSTRUCTOR) (73 samples, 2.75%)</title><rect x="998.5" y="1333" width="32.4" height="15.0" fill="rgb(231,96,13)" rx="2" ry="2" />
+<text  x="1001.52" y="1343.5" >(F..</text>
+</g>
+<g >
+<title>GET-FILE-STAMP (10 samples, 0.38%)</title><rect x="649.3" y="1029" width="4.5" height="15.0" fill="rgb(233,130,48)" rx="2" ry="2" />
+<text  x="652.31" y="1039.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (15 samples, 0.56%)</title><rect x="711.1" y="645" width="6.6" height="15.0" fill="rgb(249,35,53)" rx="2" ry="2" />
+<text  x="714.07" y="655.5" ></text>
+</g>
+<g >
+<title>(LAMBDA (SB-C::NEXT SB-C::RESULT SB-C::POST-BINDING-LEXENV) :IN SB-C::IR1-CONVERT-LET) (45 samples, 1.69%)</title><rect x="1011.0" y="853" width="19.9" height="15.0" fill="rgb(245,182,13)" rx="2" ry="2" />
+<text  x="1013.96" y="863.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (20 samples, 0.75%)</title><rect x="765.7" y="341" width="8.9" height="15.0" fill="rgb(219,32,15)" rx="2" ry="2" />
+<text  x="768.72" y="351.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (36 samples, 1.36%)</title><rect x="1015.0" y="709" width="15.9" height="15.0" fill="rgb(249,42,50)" rx="2" ry="2" />
+<text  x="1017.95" y="719.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="1158.5" y="1397" width="0.8" height="15.0" fill="rgb(209,10,9)" rx="2" ry="2" />
+<text  x="1161.46" y="1407.5" ></text>
+</g>
+<g >
+<title>NOTICE-FOREIGN-STRUCT-DEFINITION (20 samples, 0.75%)</title><rect x="1117.6" y="1413" width="8.9" height="15.0" fill="rgb(252,123,17)" rx="2" ry="2" />
+<text  x="1120.58" y="1423.5" ></text>
+</g>
+<g >
+<title>COMPUTE-SECONDARY-DISPATCH-FUNCTION1 (45 samples, 1.69%)</title><rect x="1058.0" y="1285" width="20.0" height="15.0" fill="rgb(224,141,18)" rx="2" ry="2" />
+<text  x="1061.05" y="1295.5" ></text>
+</g>
+<g >
+<title>foreign function sb_realpath (2 samples, 0.08%)</title><rect x="446.7" y="1349" width="0.9" height="15.0" fill="rgb(239,197,8)" rx="2" ry="2" />
+<text  x="449.72" y="1359.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-GET-FILE-POSITION (2 samples, 0.08%)</title><rect x="773.7" y="53" width="0.9" height="15.0" fill="rgb(250,161,10)" rx="2" ry="2" />
+<text  x="776.71" y="63.5" ></text>
+</g>
+<g >
+<title>WALK-DECLARATIONS (37 samples, 1.39%)</title><rect x="1061.6" y="1157" width="16.4" height="15.0" fill="rgb(221,198,41)" rx="2" ry="2" />
+<text  x="1064.60" y="1167.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (359 samples, 13.52%)</title><rect x="641.3" y="1093" width="159.5" height="15.0" fill="rgb(246,173,54)" rx="2" ry="2" />
+<text  x="644.32" y="1103.5" >(LAMBDA NIL :IN ASDF..</text>
+</g>
+<g >
+<title>UPGRADE-ASDF (25 samples, 0.94%)</title><rect x="1148.2" y="1765" width="11.1" height="15.0" fill="rgb(205,19,41)" rx="2" ry="2" />
+<text  x="1151.24" y="1775.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (4 samples, 0.15%)</title><rect x="994.5" y="1301" width="1.8" height="15.0" fill="rgb(236,182,19)" rx="2" ry="2" />
+<text  x="997.52" y="1311.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QUICKLISP-CLIENT:QUICKLOAD (T)) (2,607 samples, 98.16%)</title><rect x="31.8" y="1909" width="1158.2" height="15.0" fill="rgb(233,226,32)" rx="2" ry="2" />
+<text  x="34.77" y="1919.5" >(SB-PCL::FAST-METHOD QUICKLISP-CLIENT:QUICKLOAD (T))</text>
+</g>
+<g >
+<title>foreign function __getattrlist (1 samples, 0.04%)</title><rect x="447.2" y="1333" width="0.4" height="15.0" fill="rgb(232,33,15)" rx="2" ry="2" />
+<text  x="450.17" y="1343.5" ></text>
+</g>
+<g >
+<title>COMPILE-COMPONENT (10 samples, 0.38%)</title><rect x="1051.8" y="1045" width="4.5" height="15.0" fill="rgb(218,41,52)" rx="2" ry="2" />
+<text  x="1054.83" y="1055.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (54 samples, 2.03%)</title><rect x="1166.0" y="1605" width="24.0" height="15.0" fill="rgb(221,126,2)" rx="2" ry="2" />
+<text  x="1169.01" y="1615.5" >C..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (383 samples, 14.42%)</title><rect x="630.7" y="1141" width="170.1" height="15.0" fill="rgb(222,113,39)" rx="2" ry="2" />
+<text  x="633.66" y="1151.5" >(LAMBDA NIL :IN ASDF/P..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM-IN-DIST (T QL-DIST:DIST)) (8 samples, 0.30%)</title><rect x="1155.8" y="1493" width="3.5" height="15.0" fill="rgb(206,125,21)" rx="2" ry="2" />
+<text  x="1158.79" y="1503.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (626 samples, 23.57%)</title><rect x="522.7" y="1301" width="278.1" height="15.0" fill="rgb(220,125,13)" rx="2" ry="2" />
+<text  x="525.70" y="1311.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (19 samples, 0.72%)</title><rect x="1150.9" y="1669" width="8.4" height="15.0" fill="rgb(229,59,3)" rx="2" ry="2" />
+<text  x="1153.90" y="1679.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (375 samples, 14.12%)</title><rect x="634.2" y="1125" width="166.6" height="15.0" fill="rgb(249,143,30)" rx="2" ry="2" />
+<text  x="637.21" y="1135.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (8 samples, 0.30%)</title><rect x="1114.0" y="1365" width="3.6" height="15.0" fill="rgb(219,11,50)" rx="2" ry="2" />
+<text  x="1117.03" y="1375.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="681.3" y="613" width="0.4" height="15.0" fill="rgb(249,79,47)" rx="2" ry="2" />
+<text  x="684.30" y="623.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (17 samples, 0.64%)</title><rect x="1151.8" y="1637" width="7.5" height="15.0" fill="rgb(217,191,12)" rx="2" ry="2" />
+<text  x="1154.79" y="1647.5" ></text>
+</g>
+<g >
+<title>CSUBTYPEP (3 samples, 0.11%)</title><rect x="1188.7" y="757" width="1.3" height="15.0" fill="rgb(225,216,45)" rx="2" ry="2" />
+<text  x="1191.67" y="767.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (9 samples, 0.34%)</title><rect x="1033.6" y="1349" width="4.0" height="15.0" fill="rgb(206,1,5)" rx="2" ry="2" />
+<text  x="1036.61" y="1359.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="568.9" y="901" width="1.3" height="15.0" fill="rgb(252,120,18)" rx="2" ry="2" />
+<text  x="571.90" y="911.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (39 samples, 1.47%)</title><rect x="670.2" y="965" width="17.3" height="15.0" fill="rgb(205,10,50)" rx="2" ry="2" />
+<text  x="673.20" y="975.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (43 samples, 1.62%)</title><rect x="1011.8" y="821" width="19.1" height="15.0" fill="rgb(229,174,20)" rx="2" ry="2" />
+<text  x="1014.84" y="831.5" ></text>
+</g>
+<g >
+<title>%PROCESSING-DECLS (46 samples, 1.73%)</title><rect x="1010.5" y="869" width="20.4" height="15.0" fill="rgb(251,31,43)" rx="2" ry="2" />
+<text  x="1013.51" y="879.5" ></text>
+</g>
+<g >
+<title>(SB-C::TOP-LEVEL-FORM (LET ((#:G0 (FUNCALL ??? ??? :NICKNAMES ??? :DOCUMENTATION ??? :USE ??? :SHADOW ??? :SHADOWING-IMPORT-FROM ???))) (SETF (SB-IMPL::PACKAGE-SOURCE-LOCATION (FIND-PACKAGE ???)) (SB-C:SOURCE-LOCATION)) #:G0)) (22 samples, 0.83%)</title><rect x="1030.9" y="1413" width="9.8" height="15.0" fill="rgb(218,43,49)" rx="2" ry="2" />
+<text  x="1033.95" y="1423.5" ></text>
+</g>
+<g >
+<title>COMPILE (15 samples, 0.56%)</title><rect x="1049.6" y="1157" width="6.7" height="15.0" fill="rgb(250,168,26)" rx="2" ry="2" />
+<text  x="1052.61" y="1167.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-COMBINATION-CHECKING-TYPE (1 samples, 0.04%)</title><rect x="1030.5" y="149" width="0.4" height="15.0" fill="rgb(249,119,28)" rx="2" ry="2" />
+<text  x="1033.50" y="159.5" ></text>
+</g>
+<g >
+<title>COMPILER (11 samples, 0.41%)</title><rect x="1121.6" y="1253" width="4.9" height="15.0" fill="rgb(224,121,48)" rx="2" ry="2" />
+<text  x="1124.58" y="1263.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::NEXT :IN SB-FASL::MAYBE-SKIP-SHEBANG-LINE) (5 samples, 0.19%)</title><rect x="715.5" y="485" width="2.2" height="15.0" fill="rgb(235,114,39)" rx="2" ry="2" />
+<text  x="718.51" y="495.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (1,748 samples, 65.81%)</title><rect x="371.6" y="1653" width="776.6" height="15.0" fill="rgb(232,3,45)" rx="2" ry="2" />
+<text  x="374.64" y="1663.5" >(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT))</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :SEQUENCE) T)) (15 samples, 0.56%)</title><rect x="1079.8" y="1349" width="6.7" height="15.0" fill="rgb(233,95,28)" rx="2" ry="2" />
+<text  x="1082.82" y="1359.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LET* (25 samples, 0.94%)</title><rect x="1019.8" y="533" width="11.1" height="15.0" fill="rgb(235,128,42)" rx="2" ry="2" />
+<text  x="1022.84" y="543.5" ></text>
+</g>
+<g >
+<title>FASL-HEADER-P (8 samples, 0.30%)</title><rect x="714.2" y="533" width="3.5" height="15.0" fill="rgb(205,59,13)" rx="2" ry="2" />
+<text  x="717.18" y="543.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="596.0" y="661" width="0.4" height="15.0" fill="rgb(245,33,27)" rx="2" ry="2" />
+<text  x="599.00" y="671.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (175 samples, 6.59%)</title><rect x="723.1" y="805" width="77.7" height="15.0" fill="rgb(214,75,16)" rx="2" ry="2" />
+<text  x="726.06" y="815.5" >MAP-DIRE..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-SYSTEM (T)) (10 samples, 0.38%)</title><rect x="1154.9" y="1525" width="4.4" height="15.0" fill="rgb(239,37,21)" rx="2" ry="2" />
+<text  x="1157.90" y="1535.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (639 samples, 24.06%)</title><rect x="516.9" y="1317" width="283.9" height="15.0" fill="rgb(228,61,46)" rx="2" ry="2" />
+<text  x="519.92" y="1327.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>COMPILE (14 samples, 0.53%)</title><rect x="1120.2" y="1317" width="6.3" height="15.0" fill="rgb(245,93,12)" rx="2" ry="2" />
+<text  x="1123.25" y="1327.5" ></text>
+</g>
+<g >
+<title>LOAD (41 samples, 1.54%)</title><rect x="583.6" y="933" width="18.2" height="15.0" fill="rgb(248,118,4)" rx="2" ry="2" />
+<text  x="586.56" y="943.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (179 samples, 6.74%)</title><rect x="721.3" y="821" width="79.5" height="15.0" fill="rgb(250,141,41)" rx="2" ry="2" />
+<text  x="724.29" y="831.5" >(LAMBDA N..</text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (49 samples, 1.84%)</title><rect x="1009.2" y="917" width="21.7" height="15.0" fill="rgb(207,216,22)" rx="2" ry="2" />
+<text  x="1012.18" y="927.5" >I..</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (7 samples, 0.26%)</title><rect x="1083.4" y="1221" width="3.1" height="15.0" fill="rgb(217,172,3)" rx="2" ry="2" />
+<text  x="1086.37" y="1231.5" ></text>
+</g>
+<g >
+<title>%COMPILE-COMPONENT (7 samples, 0.26%)</title><rect x="1074.9" y="645" width="3.1" height="15.0" fill="rgb(208,216,12)" rx="2" ry="2" />
+<text  x="1077.93" y="655.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:PREFERENCE (T)) (4 samples, 0.15%)</title><rect x="685.7" y="773" width="1.8" height="15.0" fill="rgb(219,81,37)" rx="2" ry="2" />
+<text  x="688.75" y="783.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;THUNK&quot; :IN ASDF/ACTION:PERFORM) (11 samples, 0.41%)</title><rect x="769.7" y="197" width="4.9" height="15.0" fill="rgb(226,174,28)" rx="2" ry="2" />
+<text  x="772.71" y="207.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (601 samples, 22.63%)</title><rect x="881.2" y="1557" width="267.0" height="15.0" fill="rgb(233,77,3)" rx="2" ry="2" />
+<text  x="884.23" y="1567.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WH..</text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (5 samples, 0.19%)</title><rect x="445.4" y="1397" width="2.2" height="15.0" fill="rgb(250,174,50)" rx="2" ry="2" />
+<text  x="448.39" y="1407.5" ></text>
+</g>
+<g >
+<title>LOAD-SYSTEM (24 samples, 0.90%)</title><rect x="1148.7" y="1749" width="10.6" height="15.0" fill="rgb(232,137,6)" rx="2" ry="2" />
+<text  x="1151.68" y="1759.5" ></text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (17 samples, 0.64%)</title><rect x="912.3" y="1477" width="7.6" height="15.0" fill="rgb(218,165,43)" rx="2" ry="2" />
+<text  x="915.33" y="1487.5" ></text>
+</g>
+<g >
+<title>%DO-FORMS-FROM-INFO (4 samples, 0.15%)</title><rect x="772.8" y="85" width="1.8" height="15.0" fill="rgb(205,202,31)" rx="2" ry="2" />
+<text  x="775.82" y="95.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-ASDF-SESSION (2,077 samples, 78.20%)</title><rect x="225.5" y="1765" width="922.7" height="15.0" fill="rgb(241,8,52)" rx="2" ry="2" />
+<text  x="228.47" y="1775.5" >CALL-WITH-ASDF-SESSION</text>
+</g>
+<g >
+<title>GET-FUN1 (44 samples, 1.66%)</title><rect x="1058.5" y="1269" width="19.5" height="15.0" fill="rgb(236,209,51)" rx="2" ry="2" />
+<text  x="1061.49" y="1279.5" ></text>
+</g>
+<g >
+<title>%TYPE-INTERSECTION (1 samples, 0.04%)</title><rect x="1189.6" y="725" width="0.4" height="15.0" fill="rgb(224,119,3)" rx="2" ry="2" />
+<text  x="1192.56" y="735.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA (56 samples, 2.11%)</title><rect x="1006.1" y="1029" width="24.8" height="15.0" fill="rgb(248,22,5)" rx="2" ry="2" />
+<text  x="1009.07" y="1039.5" >I..</text>
+</g>
+<g >
+<title>%MAP-FOR-EFFECT-ARITY-1 (13 samples, 0.49%)</title><rect x="861.2" y="1509" width="5.8" height="15.0" fill="rgb(216,227,42)" rx="2" ry="2" />
+<text  x="864.23" y="1519.5" ></text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (8 samples, 0.30%)</title><rect x="1082.9" y="1237" width="3.6" height="15.0" fill="rgb(215,70,27)" rx="2" ry="2" />
+<text  x="1085.93" y="1247.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::THUNK :IN LOAD) (35 samples, 1.32%)</title><rect x="1174.5" y="1301" width="15.5" height="15.0" fill="rgb(212,140,22)" rx="2" ry="2" />
+<text  x="1177.45" y="1311.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (6 samples, 0.23%)</title><rect x="567.6" y="949" width="2.6" height="15.0" fill="rgb(253,162,16)" rx="2" ry="2" />
+<text  x="570.57" y="959.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :GROUP) T)) (27 samples, 1.02%)</title><rect x="1044.3" y="1349" width="12.0" height="15.0" fill="rgb(248,87,40)" rx="2" ry="2" />
+<text  x="1047.28" y="1359.5" ></text>
+</g>
+<g >
+<title>GET-FILE-STAMP (9 samples, 0.34%)</title><rect x="566.2" y="997" width="4.0" height="15.0" fill="rgb(240,200,11)" rx="2" ry="2" />
+<text  x="569.23" y="1007.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:MAKE-PLAN) (15 samples, 0.56%)</title><rect x="563.6" y="1093" width="6.6" height="15.0" fill="rgb(238,26,47)" rx="2" ry="2" />
+<text  x="566.57" y="1103.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="680.4" y="645" width="1.3" height="15.0" fill="rgb(215,142,21)" rx="2" ry="2" />
+<text  x="683.41" y="655.5" ></text>
+</g>
+<g >
+<title>%SIMPLE-EVAL (27 samples, 1.02%)</title><rect x="1178.0" y="1173" width="12.0" height="15.0" fill="rgb(206,50,1)" rx="2" ry="2" />
+<text  x="1181.00" y="1183.5" ></text>
+</g>
+<g >
+<title>WALK-LET (26 samples, 0.98%)</title><rect x="1066.5" y="981" width="11.5" height="15.0" fill="rgb(228,56,42)" rx="2" ry="2" />
+<text  x="1069.49" y="991.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (36 samples, 1.36%)</title><rect x="784.8" y="405" width="16.0" height="15.0" fill="rgb(247,20,53)" rx="2" ry="2" />
+<text  x="787.82" y="415.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN (T)) (65 samples, 2.45%)</title><rect x="572.9" y="1061" width="28.9" height="15.0" fill="rgb(245,78,44)" rx="2" ry="2" />
+<text  x="575.90" y="1071.5" >(S..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN SB-WALKER::WALK-FORM-INTERNAL) (40 samples, 1.51%)</title><rect x="1060.3" y="1205" width="17.7" height="15.0" fill="rgb(254,54,50)" rx="2" ry="2" />
+<text  x="1063.27" y="1215.5" ></text>
+</g>
+<g >
+<title>SYSTEM-DEFINITION-SEARCHER (9 samples, 0.34%)</title><rect x="683.5" y="853" width="4.0" height="15.0" fill="rgb(246,94,45)" rx="2" ry="2" />
+<text  x="686.52" y="863.5" ></text>
+</g>
+<g >
+<title>WALK-BINDINGS-1 (24 samples, 0.90%)</title><rect x="1067.4" y="949" width="10.6" height="15.0" fill="rgb(243,152,8)" rx="2" ry="2" />
+<text  x="1070.38" y="959.5" ></text>
+</g>
+<g >
+<title>foreign function __getattrlist (1 samples, 0.04%)</title><rect x="918.5" y="1349" width="0.5" height="15.0" fill="rgb(218,161,32)" rx="2" ry="2" />
+<text  x="921.55" y="1359.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AROUND (T)) (48 samples, 1.81%)</title><rect x="1168.7" y="1509" width="21.3" height="15.0" fill="rgb(219,106,44)" rx="2" ry="2" />
+<text  x="1171.67" y="1519.5" >(..</text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="1157.1" y="1445" width="2.2" height="15.0" fill="rgb(242,39,7)" rx="2" ry="2" />
+<text  x="1160.12" y="1455.5" ></text>
+</g>
+<g >
+<title>UNION-COMPLEX-SUBTYPEP-ARG2 (2 samples, 0.08%)</title><rect x="1189.1" y="741" width="0.9" height="15.0" fill="rgb(208,186,39)" rx="2" ry="2" />
+<text  x="1192.11" y="751.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (5 samples, 0.19%)</title><rect x="651.5" y="949" width="2.3" height="15.0" fill="rgb(239,208,44)" rx="2" ry="2" />
+<text  x="654.54" y="959.5" ></text>
+</g>
+<g >
+<title>LOAD-AS-FASL (6 samples, 0.23%)</title><rect x="864.3" y="1397" width="2.7" height="15.0" fill="rgb(232,202,54)" rx="2" ry="2" />
+<text  x="867.34" y="1407.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (107 samples, 4.03%)</title><rect x="753.3" y="533" width="47.5" height="15.0" fill="rgb(211,32,48)" rx="2" ry="2" />
+<text  x="756.28" y="543.5" >TRAV..</text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="793.7" y="197" width="2.2" height="15.0" fill="rgb(241,39,14)" rx="2" ry="2" />
+<text  x="796.70" y="207.5" ></text>
+</g>
+<g >
+<title>CONSTRAINT-PROPAGATE-IN-BLOCK (4 samples, 0.15%)</title><rect x="1054.5" y="949" width="1.8" height="15.0" fill="rgb(236,219,2)" rx="2" ry="2" />
+<text  x="1057.50" y="959.5" ></text>
+</g>
+<g >
+<title>LISP-IMPLEMENTATION-PATHNAME-P (7 samples, 0.26%)</title><rect x="596.9" y="757" width="3.1" height="15.0" fill="rgb(239,27,32)" rx="2" ry="2" />
+<text  x="599.89" y="767.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (54 samples, 2.03%)</title><rect x="1007.0" y="997" width="23.9" height="15.0" fill="rgb(230,221,7)" rx="2" ry="2" />
+<text  x="1009.96" y="1007.5" >I..</text>
+</g>
+<g >
+<title>CONVERT (78 samples, 2.94%)</title><rect x="1043.4" y="1365" width="34.6" height="15.0" fill="rgb(248,75,27)" rx="2" ry="2" />
+<text  x="1046.39" y="1375.5" >CO..</text>
+</g>
+<g >
+<title>CALL-WITH-CONSISTENT-DISTS (68 samples, 2.56%)</title><rect x="1159.8" y="1829" width="30.2" height="15.0" fill="rgb(235,58,2)" rx="2" ry="2" />
+<text  x="1162.79" y="1839.5" >CA..</text>
+</g>
+<g >
+<title>(FLET ASDF/SYSTEM-REGISTRY::TRY :IN ASDF/SYSTEM-REGISTRY:SEARCH-FOR-SYSTEM-DEFINITION) (10 samples, 0.38%)</title><rect x="683.1" y="869" width="4.4" height="15.0" fill="rgb(245,143,12)" rx="2" ry="2" />
+<text  x="686.08" y="879.5" ></text>
+</g>
+<g >
+<title>(SB-C::TOP-LEVEL-FORM (LET* ((CL-PPCRE:*USE-BMH-MATCHERS* NIL) (CL-PPCRE::REG-SCANNER (CL-PPCRE:CREATE-SCANNER &quot;\\\\(?:\\\\|\\{\\d+\\}|\\d+|&amp;|`|')&quot;))) (DEFMETHOD CL-PPCRE::BUILD-REPLACEMENT-TEMPLATE ((CL-PPCRE::REPLACEMENT-STRING STRING)) (DECLARE (OPTIMIZE SPEED ??? ??? ???)) (LET (??? ???) (CL-PPCRE:DO-MATCHES ??? ??? ??? ???) (WHEN ??? ???) (NREVERSE CL-PPCRE::COLLECTOR))))) (84 samples, 3.16%)</title><rect x="1040.7" y="1413" width="37.3" height="15.0" fill="rgb(253,178,6)" rx="2" ry="2" />
+<text  x="1043.72" y="1423.5" >(SB..</text>
+</g>
+<g >
+<title>TRUENAMIZE (8 samples, 0.30%)</title><rect x="650.2" y="997" width="3.6" height="15.0" fill="rgb(250,198,5)" rx="2" ry="2" />
+<text  x="653.20" y="1007.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-ASDF-SESSION (2,198 samples, 82.76%)</title><rect x="182.8" y="1797" width="976.5" height="15.0" fill="rgb(252,5,26)" rx="2" ry="2" />
+<text  x="185.82" y="1807.5" >CALL-WITH-ASDF-SESSION</text>
+</g>
+<g >
+<title>IR1-CONVERT (10 samples, 0.38%)</title><rect x="1185.6" y="869" width="4.4" height="15.0" fill="rgb(253,200,38)" rx="2" ry="2" />
+<text  x="1188.56" y="879.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (18 samples, 0.68%)</title><rect x="709.7" y="693" width="8.0" height="15.0" fill="rgb(236,100,30)" rx="2" ry="2" />
+<text  x="712.74" y="703.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (47 samples, 1.77%)</title><rect x="1169.1" y="1493" width="20.9" height="15.0" fill="rgb(238,172,39)" rx="2" ry="2" />
+<text  x="1172.12" y="1503.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (20 samples, 0.75%)</title><rect x="708.8" y="725" width="8.9" height="15.0" fill="rgb(240,207,42)" rx="2" ry="2" />
+<text  x="711.85" y="735.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (7 samples, 0.26%)</title><rect x="444.5" y="1429" width="3.1" height="15.0" fill="rgb(240,172,19)" rx="2" ry="2" />
+<text  x="447.50" y="1439.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOAD-ASD) (24 samples, 0.90%)</title><rect x="707.1" y="789" width="10.6" height="15.0" fill="rgb(205,14,26)" rx="2" ry="2" />
+<text  x="710.07" y="799.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (94 samples, 3.54%)</title><rect x="560.0" y="1125" width="41.8" height="15.0" fill="rgb(205,208,18)" rx="2" ry="2" />
+<text  x="563.02" y="1135.5" >(SB..</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (171 samples, 6.44%)</title><rect x="724.8" y="789" width="76.0" height="15.0" fill="rgb(222,119,4)" rx="2" ry="2" />
+<text  x="727.84" y="799.5" >TRAVERSE..</text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (16 samples, 0.60%)</title><rect x="1119.4" y="1349" width="7.1" height="15.0" fill="rgb(209,167,40)" rx="2" ry="2" />
+<text  x="1122.36" y="1359.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION T)) (56 samples, 2.11%)</title><rect x="1165.1" y="1637" width="24.9" height="15.0" fill="rgb(225,228,16)" rx="2" ry="2" />
+<text  x="1168.12" y="1647.5" >(..</text>
+</g>
+<g >
+<title>IR1-CONVERT-BLOCK (28 samples, 1.05%)</title><rect x="1018.5" y="581" width="12.4" height="15.0" fill="rgb(227,212,15)" rx="2" ry="2" />
+<text  x="1021.51" y="591.5" ></text>
+</g>
+<g >
+<title>EVAL-TLF (20 samples, 0.75%)</title><rect x="591.1" y="805" width="8.9" height="15.0" fill="rgb(251,156,26)" rx="2" ry="2" />
+<text  x="594.11" y="815.5" ></text>
+</g>
+<g >
+<title>CHECK-OK-TARGET (1 samples, 0.04%)</title><rect x="1077.6" y="549" width="0.4" height="15.0" fill="rgb(235,113,28)" rx="2" ry="2" />
+<text  x="1080.60" y="559.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-SPECIAL-BINDINGS (19 samples, 0.72%)</title><rect x="1181.6" y="1013" width="8.4" height="15.0" fill="rgb(244,129,45)" rx="2" ry="2" />
+<text  x="1184.56" y="1023.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:FIND-RELEASE-IN-DIST (T QL-DIST:DIST)) (7 samples, 0.26%)</title><rect x="606.2" y="1013" width="3.1" height="15.0" fill="rgb(249,47,49)" rx="2" ry="2" />
+<text  x="609.22" y="1023.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (821 samples, 30.91%)</title><rect x="436.1" y="1525" width="364.7" height="15.0" fill="rgb(253,30,52)" rx="2" ry="2" />
+<text  x="439.06" y="1535.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION)</text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (20 samples, 0.75%)</title><rect x="1181.1" y="1029" width="8.9" height="15.0" fill="rgb(217,86,54)" rx="2" ry="2" />
+<text  x="1184.11" y="1039.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (351 samples, 13.22%)</title><rect x="644.9" y="1077" width="155.9" height="15.0" fill="rgb(242,95,26)" rx="2" ry="2" />
+<text  x="647.87" y="1087.5" >(LAMBDA NIL :IN ASDF..</text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (7 samples, 0.26%)</title><rect x="1088.7" y="1333" width="3.1" height="15.0" fill="rgb(237,229,7)" rx="2" ry="2" />
+<text  x="1091.70" y="1343.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:MAKE-PLAN) (15 samples, 0.56%)</title><rect x="675.1" y="837" width="6.6" height="15.0" fill="rgb(251,31,30)" rx="2" ry="2" />
+<text  x="678.08" y="847.5" ></text>
+</g>
+<g >
+<title>SEARCH-FOR-SYSTEM-DEFINITION (14 samples, 0.53%)</title><rect x="775.0" y="389" width="6.3" height="15.0" fill="rgb(224,100,19)" rx="2" ry="2" />
+<text  x="778.05" y="399.5" ></text>
+</g>
+<g >
+<title>LOAD (9 samples, 0.34%)</title><rect x="713.7" y="549" width="4.0" height="15.0" fill="rgb(206,182,9)" rx="2" ry="2" />
+<text  x="716.73" y="559.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="798.6" y="197" width="2.2" height="15.0" fill="rgb(227,151,20)" rx="2" ry="2" />
+<text  x="801.59" y="207.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (3 samples, 0.11%)</title><rect x="1036.3" y="1253" width="1.3" height="15.0" fill="rgb(232,137,9)" rx="2" ry="2" />
+<text  x="1039.28" y="1263.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (19 samples, 0.72%)</title><rect x="1022.5" y="437" width="8.4" height="15.0" fill="rgb(235,172,48)" rx="2" ry="2" />
+<text  x="1025.51" y="447.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (65 samples, 2.45%)</title><rect x="1002.1" y="1173" width="28.8" height="15.0" fill="rgb(211,126,47)" rx="2" ry="2" />
+<text  x="1005.07" y="1183.5" >IR..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :GROUP) T)) (16 samples, 0.60%)</title><rect x="1079.4" y="1365" width="7.1" height="15.0" fill="rgb(214,151,29)" rx="2" ry="2" />
+<text  x="1082.38" y="1375.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS :AROUND (T T)) (62 samples, 2.33%)</title><rect x="574.2" y="1045" width="27.6" height="15.0" fill="rgb(221,204,3)" rx="2" ry="2" />
+<text  x="577.23" y="1055.5" >(..</text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (12 samples, 0.45%)</title><rect x="1121.1" y="1285" width="5.4" height="15.0" fill="rgb(205,165,26)" rx="2" ry="2" />
+<text  x="1124.14" y="1295.5" ></text>
+</g>
+<g >
+<title>%DO-FORMS-FROM-INFO (33 samples, 1.24%)</title><rect x="1175.3" y="1269" width="14.7" height="15.0" fill="rgb(226,143,34)" rx="2" ry="2" />
+<text  x="1178.34" y="1279.5" ></text>
+</g>
+<g >
+<title>READ-BASE-STRING-AS-BYTES (5 samples, 0.19%)</title><rect x="994.1" y="1317" width="2.2" height="15.0" fill="rgb(253,78,21)" rx="2" ry="2" />
+<text  x="997.07" y="1327.5" ></text>
+</g>
+<g >
+<title>FASL-HEADER-P (8 samples, 0.30%)</title><rect x="1126.5" y="1493" width="3.5" height="15.0" fill="rgb(241,189,10)" rx="2" ry="2" />
+<text  x="1129.47" y="1503.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (30 samples, 1.13%)</title><rect x="1017.6" y="613" width="13.3" height="15.0" fill="rgb(241,129,48)" rx="2" ry="2" />
+<text  x="1020.62" y="623.5" ></text>
+</g>
+<g >
+<title>(LAMBDA (&amp;REST SB-PCL::ARGS) :IN SB-PCL::INSTALL-INITIAL-CONSTRUCTOR) (77 samples, 2.90%)</title><rect x="996.7" y="1397" width="34.2" height="15.0" fill="rgb(230,193,45)" rx="2" ry="2" />
+<text  x="999.74" y="1407.5" >(L..</text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (2 samples, 0.08%)</title><rect x="1129.1" y="1397" width="0.9" height="15.0" fill="rgb(236,78,52)" rx="2" ry="2" />
+<text  x="1132.13" y="1407.5" ></text>
+</g>
+<g >
+<title>all (2,656 samples, 100%)</title><rect x="10.0" y="1941" width="1180.0" height="15.0" fill="rgb(225,53,11)" rx="2" ry="2" />
+<text  x="13.00" y="1951.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MUFFLED-CONDITIONS (10 samples, 0.38%)</title><rect x="713.3" y="565" width="4.4" height="15.0" fill="rgb(232,158,35)" rx="2" ry="2" />
+<text  x="716.29" y="575.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (10 samples, 0.38%)</title><rect x="791.5" y="277" width="4.4" height="15.0" fill="rgb(250,227,52)" rx="2" ry="2" />
+<text  x="794.48" y="287.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (6 samples, 0.23%)</title><rect x="679.1" y="693" width="2.6" height="15.0" fill="rgb(240,137,6)" rx="2" ry="2" />
+<text  x="682.08" y="703.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (12 samples, 0.45%)</title><rect x="1112.3" y="1381" width="5.3" height="15.0" fill="rgb(230,7,2)" rx="2" ry="2" />
+<text  x="1115.25" y="1391.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (55 samples, 2.07%)</title><rect x="1165.6" y="1621" width="24.4" height="15.0" fill="rgb(221,84,44)" rx="2" ry="2" />
+<text  x="1168.56" y="1631.5" >(..</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (155 samples, 5.84%)</title><rect x="732.0" y="725" width="68.8" height="15.0" fill="rgb(246,8,53)" rx="2" ry="2" />
+<text  x="734.95" y="735.5" >TRAVERS..</text>
+</g>
+<g >
+<title>FIND-ASDF-SYSTEM-FILE (11 samples, 0.41%)</title><rect x="1154.5" y="1541" width="4.8" height="15.0" fill="rgb(252,155,48)" rx="2" ry="2" />
+<text  x="1157.46" y="1551.5" ></text>
+</g>
+<g >
+<title>TEMPLATE-RESULTS-OK (2 samples, 0.08%)</title><rect x="1125.6" y="1093" width="0.9" height="15.0" fill="rgb(223,197,5)" rx="2" ry="2" />
+<text  x="1128.58" y="1103.5" ></text>
+</g>
+<g >
+<title>%COMPILE (10 samples, 0.38%)</title><rect x="1122.0" y="1221" width="4.5" height="15.0" fill="rgb(250,3,23)" rx="2" ry="2" />
+<text  x="1125.03" y="1231.5" ></text>
+</g>
+<g >
+<title>MAKE-SYSTEM-FROM-LINE (8 samples, 0.30%)</title><rect x="605.8" y="1029" width="3.5" height="15.0" fill="rgb(221,10,29)" rx="2" ry="2" />
+<text  x="608.78" y="1039.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (52 samples, 1.96%)</title><rect x="1166.9" y="1573" width="23.1" height="15.0" fill="rgb(249,123,40)" rx="2" ry="2" />
+<text  x="1169.90" y="1583.5" >(..</text>
+</g>
+<g >
+<title>%COMPILE (68 samples, 2.56%)</title><rect x="1000.7" y="1221" width="30.2" height="15.0" fill="rgb(227,191,30)" rx="2" ry="2" />
+<text  x="1003.74" y="1231.5" >%C..</text>
+</g>
+<g >
+<title>PROBE-FILE (6 samples, 0.23%)</title><rect x="444.9" y="1413" width="2.7" height="15.0" fill="rgb(232,179,9)" rx="2" ry="2" />
+<text  x="447.95" y="1423.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-FLET (35 samples, 1.32%)</title><rect x="1015.4" y="693" width="15.5" height="15.0" fill="rgb(236,150,4)" rx="2" ry="2" />
+<text  x="1018.40" y="703.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (756 samples, 28.46%)</title><rect x="464.9" y="1461" width="335.9" height="15.0" fill="rgb(228,68,3)" rx="2" ry="2" />
+<text  x="467.94" y="1471.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION)</text>
+</g>
+<g >
+<title>EQUAL-BUT-NO-CAR-RECURSION (1 samples, 0.04%)</title><rect x="1055.8" y="901" width="0.5" height="15.0" fill="rgb(234,25,41)" rx="2" ry="2" />
+<text  x="1058.83" y="911.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::LOAD-STREAM :IN LOAD) (8 samples, 0.30%)</title><rect x="771.0" y="149" width="3.6" height="15.0" fill="rgb(215,137,23)" rx="2" ry="2" />
+<text  x="774.05" y="159.5" ></text>
+</g>
+<g >
+<title>LOAD-AS-SOURCE (34 samples, 1.28%)</title><rect x="1174.9" y="1285" width="15.1" height="15.0" fill="rgb(215,31,3)" rx="2" ry="2" />
+<text  x="1177.89" y="1295.5" ></text>
+</g>
+<g >
+<title>VALUES-SUBTYPEP (4 samples, 0.15%)</title><rect x="1188.2" y="773" width="1.8" height="15.0" fill="rgb(236,182,33)" rx="2" ry="2" />
+<text  x="1191.22" y="783.5" ></text>
+</g>
+<g >
+<title>SEARCH-FOR-SYSTEM-DEFINITION (12 samples, 0.45%)</title><rect x="682.2" y="901" width="5.3" height="15.0" fill="rgb(225,39,50)" rx="2" ry="2" />
+<text  x="685.19" y="911.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (399 samples, 15.02%)</title><rect x="623.5" y="1173" width="177.3" height="15.0" fill="rgb(239,126,19)" rx="2" ry="2" />
+<text  x="626.55" y="1183.5" >TRAVERSE-ACTION</text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (9 samples, 0.34%)</title><rect x="443.6" y="1461" width="4.0" height="15.0" fill="rgb(218,218,10)" rx="2" ry="2" />
+<text  x="446.61" y="1471.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM (ASDF/FIND-SYSTEM:DEFINE-OP ASDF/SYSTEM:SYSTEM)) (42 samples, 1.58%)</title><rect x="1171.3" y="1413" width="18.7" height="15.0" fill="rgb(241,155,29)" rx="2" ry="2" />
+<text  x="1174.34" y="1423.5" ></text>
+</g>
+<g >
+<title>LOAD-AS-SOURCE (5 samples, 0.19%)</title><rect x="772.4" y="101" width="2.2" height="15.0" fill="rgb(230,38,4)" rx="2" ry="2" />
+<text  x="775.38" y="111.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (1,983 samples, 74.66%)</title><rect x="267.2" y="1733" width="881.0" height="15.0" fill="rgb(215,44,52)" rx="2" ry="2" />
+<text  x="270.24" y="1743.5" >(LAMBDA NIL :IN ASDF/OPERATE:OPERATE)</text>
+</g>
+<g >
+<title>(FLET &quot;LAMBDA0&quot; :IN &quot;SYS:SRC (11 samples, 0.41%)</title><rect x="1121.6" y="1269" width="4.9" height="15.0" fill="rgb(227,224,40)" rx="2" ry="2" />
+<text  x="1124.58" y="1279.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (26 samples, 0.98%)</title><rect x="706.2" y="821" width="11.5" height="15.0" fill="rgb(244,143,54)" rx="2" ry="2" />
+<text  x="709.18" y="831.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-SYSTEM-MUTEX/WITHOUT-GCING (10 samples, 0.38%)</title><rect x="1102.5" y="1365" width="4.4" height="15.0" fill="rgb(254,134,15)" rx="2" ry="2" />
+<text  x="1105.48" y="1375.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (600 samples, 22.59%)</title><rect x="534.2" y="1269" width="266.6" height="15.0" fill="rgb(220,79,12)" rx="2" ry="2" />
+<text  x="537.25" y="1279.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-..</text>
+</g>
+<g >
+<title>WALK-FORM-INTERNAL (23 samples, 0.87%)</title><rect x="1067.8" y="933" width="10.2" height="15.0" fill="rgb(246,110,36)" rx="2" ry="2" />
+<text  x="1070.82" y="943.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-THE (12 samples, 0.45%)</title><rect x="1184.7" y="901" width="5.3" height="15.0" fill="rgb(224,49,47)" rx="2" ry="2" />
+<text  x="1187.67" y="911.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="595.6" y="677" width="0.8" height="15.0" fill="rgb(252,113,7)" rx="2" ry="2" />
+<text  x="598.56" y="687.5" ></text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (43 samples, 1.62%)</title><rect x="762.2" y="437" width="19.1" height="15.0" fill="rgb(228,63,45)" rx="2" ry="2" />
+<text  x="765.16" y="447.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (6 samples, 0.23%)</title><rect x="793.3" y="213" width="2.6" height="15.0" fill="rgb(244,105,29)" rx="2" ry="2" />
+<text  x="796.26" y="223.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (163 samples, 6.14%)</title><rect x="728.4" y="757" width="72.4" height="15.0" fill="rgb(234,84,48)" rx="2" ry="2" />
+<text  x="731.40" y="767.5" >(LAMBDA ..</text>
+</g>
+<g >
+<title>MAYBE-SPLIT-REPETITION (21 samples, 0.79%)</title><rect x="1046.9" y="1253" width="9.4" height="15.0" fill="rgb(209,145,44)" rx="2" ry="2" />
+<text  x="1049.94" y="1263.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:OUTPUT-FILES) (9 samples, 0.34%)</title><rect x="791.9" y="261" width="4.0" height="15.0" fill="rgb(246,95,43)" rx="2" ry="2" />
+<text  x="794.93" y="271.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;THUNK&quot; :IN ASDF/ACTION:PERFORM) (40 samples, 1.51%)</title><rect x="1172.2" y="1381" width="17.8" height="15.0" fill="rgb(237,68,21)" rx="2" ry="2" />
+<text  x="1175.23" y="1391.5" ></text>
+</g>
+<g >
+<title>%PROCESSING-DECLS (38 samples, 1.43%)</title><rect x="1014.1" y="741" width="16.8" height="15.0" fill="rgb(214,39,37)" rx="2" ry="2" />
+<text  x="1017.07" y="751.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (11 samples, 0.41%)</title><rect x="442.7" y="1493" width="4.9" height="15.0" fill="rgb(210,114,51)" rx="2" ry="2" />
+<text  x="445.73" y="1503.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOCATE-SYSTEM) (15 samples, 0.56%)</title><rect x="774.6" y="405" width="6.7" height="15.0" fill="rgb(242,63,33)" rx="2" ry="2" />
+<text  x="777.60" y="415.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (103 samples, 3.88%)</title><rect x="755.1" y="517" width="45.7" height="15.0" fill="rgb(237,145,18)" rx="2" ry="2" />
+<text  x="758.05" y="527.5" >(LAM..</text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="652.0" y="933" width="1.8" height="15.0" fill="rgb(224,68,11)" rx="2" ry="2" />
+<text  x="654.98" y="943.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (7 samples, 0.26%)</title><rect x="1186.9" y="821" width="3.1" height="15.0" fill="rgb(247,78,7)" rx="2" ry="2" />
+<text  x="1189.89" y="831.5" ></text>
+</g>
+<g >
+<title>GET-SECONDARY-DISPATCH-FUNCTION1 (46 samples, 1.73%)</title><rect x="1057.6" y="1301" width="20.4" height="15.0" fill="rgb(207,138,28)" rx="2" ry="2" />
+<text  x="1060.61" y="1311.5" ></text>
+</g>
+<g >
+<title>FOP-LOAD-CODE (30 samples, 1.13%)</title><rect x="1095.4" y="1413" width="13.3" height="15.0" fill="rgb(205,56,19)" rx="2" ry="2" />
+<text  x="1098.37" y="1423.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (42 samples, 1.58%)</title><rect x="1012.3" y="805" width="18.6" height="15.0" fill="rgb(246,8,27)" rx="2" ry="2" />
+<text  x="1015.29" y="815.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MUFFLED-CONDITIONS (44 samples, 1.66%)</title><rect x="582.2" y="949" width="19.6" height="15.0" fill="rgb(247,109,15)" rx="2" ry="2" />
+<text  x="585.23" y="959.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (42 samples, 1.58%)</title><rect x="782.2" y="453" width="18.6" height="15.0" fill="rgb(247,54,43)" rx="2" ry="2" />
+<text  x="785.15" y="463.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (24 samples, 0.90%)</title><rect x="790.2" y="309" width="10.6" height="15.0" fill="rgb(232,67,44)" rx="2" ry="2" />
+<text  x="793.15" y="319.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (587 samples, 22.10%)</title><rect x="540.0" y="1253" width="260.8" height="15.0" fill="rgb(246,98,37)" rx="2" ry="2" />
+<text  x="543.02" y="1263.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (331 samples, 12.46%)</title><rect x="653.8" y="1061" width="147.0" height="15.0" fill="rgb(208,88,10)" rx="2" ry="2" />
+<text  x="656.76" y="1071.5" >MAP-DIRECT-DEPENDE..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (225 samples, 8.47%)</title><rect x="700.9" y="885" width="99.9" height="15.0" fill="rgb(222,176,13)" rx="2" ry="2" />
+<text  x="703.85" y="895.5" >(LAMBDA NIL ..</text>
+</g>
+<g >
+<title>EVAL-TLF (30 samples, 1.13%)</title><rect x="1176.7" y="1221" width="13.3" height="15.0" fill="rgb(228,136,5)" rx="2" ry="2" />
+<text  x="1179.67" y="1231.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (4 samples, 0.15%)</title><rect x="1035.8" y="1269" width="1.8" height="15.0" fill="rgb(242,38,43)" rx="2" ry="2" />
+<text  x="1038.84" y="1279.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (1,795 samples, 67.58%)</title><rect x="350.8" y="1669" width="797.4" height="15.0" fill="rgb(207,21,6)" rx="2" ry="2" />
+<text  x="353.76" y="1679.5" >(SB-PCL::EMF ASDF/OPERATE:OPERATE)</text>
+</g>
+<g >
+<title>PRIMITIVE-TYPE-AUX (1 samples, 0.04%)</title><rect x="1126.0" y="1077" width="0.5" height="15.0" fill="rgb(243,162,54)" rx="2" ry="2" />
+<text  x="1129.02" y="1087.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM (ASDF/FIND-SYSTEM:DEFINE-OP ASDF/SYSTEM:SYSTEM)) (53 samples, 2.00%)</title><rect x="578.2" y="997" width="23.6" height="15.0" fill="rgb(243,166,50)" rx="2" ry="2" />
+<text  x="581.23" y="1007.5" >(..</text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (14 samples, 0.53%)</title><rect x="564.0" y="1077" width="6.2" height="15.0" fill="rgb(240,152,6)" rx="2" ry="2" />
+<text  x="567.01" y="1087.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="919.4" y="1365" width="0.5" height="15.0" fill="rgb(230,225,22)" rx="2" ry="2" />
+<text  x="922.44" y="1375.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (2 samples, 0.08%)</title><rect x="1030.1" y="165" width="0.8" height="15.0" fill="rgb(218,9,15)" rx="2" ry="2" />
+<text  x="1033.06" y="175.5" ></text>
+</g>
+<g >
+<title>COMPILER (24 samples, 0.90%)</title><rect x="1179.3" y="1109" width="10.7" height="15.0" fill="rgb(216,151,17)" rx="2" ry="2" />
+<text  x="1182.34" y="1119.5" ></text>
+</g>
+<g >
+<title>INITIAL-DFUN (49 samples, 1.84%)</title><rect x="1056.3" y="1349" width="21.7" height="15.0" fill="rgb(244,49,42)" rx="2" ry="2" />
+<text  x="1059.27" y="1359.5" >I..</text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (10 samples, 0.38%)</title><rect x="1087.4" y="1381" width="4.4" height="15.0" fill="rgb(251,59,49)" rx="2" ry="2" />
+<text  x="1090.37" y="1391.5" ></text>
+</g>
+<g >
+<title>%WITH-STANDARD-IO-SYNTAX (41 samples, 1.54%)</title><rect x="1171.8" y="1397" width="18.2" height="15.0" fill="rgb(246,173,21)" rx="2" ry="2" />
+<text  x="1174.78" y="1407.5" ></text>
+</g>
+<g >
+<title>UNIX-STAT (8 samples, 0.30%)</title><rect x="1144.2" y="1429" width="3.6" height="15.0" fill="rgb(219,189,18)" rx="2" ry="2" />
+<text  x="1147.24" y="1439.5" ></text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="569.8" y="869" width="0.4" height="15.0" fill="rgb(231,168,54)" rx="2" ry="2" />
+<text  x="572.79" y="879.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (6 samples, 0.23%)</title><rect x="798.1" y="213" width="2.7" height="15.0" fill="rgb(210,13,33)" rx="2" ry="2" />
+<text  x="801.15" y="223.5" ></text>
+</g>
+<g >
+<title>%MAP-FOR-EFFECT-ARITY-1 (11 samples, 0.41%)</title><rect x="682.6" y="885" width="4.9" height="15.0" fill="rgb(210,45,10)" rx="2" ry="2" />
+<text  x="685.64" y="895.5" ></text>
+</g>
+<g >
+<title>METHODS-CONVERTER (18 samples, 0.68%)</title><rect x="1070.0" y="853" width="8.0" height="15.0" fill="rgb(205,185,18)" rx="2" ry="2" />
+<text  x="1073.05" y="863.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-LOAD-BINDINGS (7 samples, 0.26%)</title><rect x="771.5" y="133" width="3.1" height="15.0" fill="rgb(243,153,20)" rx="2" ry="2" />
+<text  x="774.49" y="143.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LET (47 samples, 1.77%)</title><rect x="1010.1" y="885" width="20.8" height="15.0" fill="rgb(247,174,8)" rx="2" ry="2" />
+<text  x="1013.07" y="895.5" ></text>
+</g>
+<g >
+<title>(LAMBDA (&amp;REST SB-PCL::ARGS) :IN SB-PCL::INSTALL-INITIAL-CONSTRUCTOR) (20 samples, 0.75%)</title><rect x="1047.4" y="1237" width="8.9" height="15.0" fill="rgb(211,229,40)" rx="2" ry="2" />
+<text  x="1050.39" y="1247.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-CURRENT-SOURCE-FORM (28 samples, 1.05%)</title><rect x="1065.6" y="1013" width="12.4" height="15.0" fill="rgb(227,22,36)" rx="2" ry="2" />
+<text  x="1068.60" y="1023.5" ></text>
+</g>
+<g >
+<title>MAKE-VALUES-TYPE-CACHED (2 samples, 0.08%)</title><rect x="1055.4" y="917" width="0.9" height="15.0" fill="rgb(218,14,12)" rx="2" ry="2" />
+<text  x="1058.38" y="927.5" ></text>
+</g>
+<g >
+<title>foreign function __open (1 samples, 0.04%)</title><rect x="687.1" y="725" width="0.4" height="15.0" fill="rgb(211,179,54)" rx="2" ry="2" />
+<text  x="690.08" y="735.5" ></text>
+</g>
+<g >
+<title>WALK-DECLARATIONS (31 samples, 1.17%)</title><rect x="1064.3" y="1061" width="13.7" height="15.0" fill="rgb(231,228,17)" rx="2" ry="2" />
+<text  x="1067.27" y="1071.5" ></text>
+</g>
+<g >
+<title>%MAP-FOR-EFFECT-ARITY-1 (13 samples, 0.49%)</title><rect x="775.5" y="373" width="5.8" height="15.0" fill="rgb(226,116,15)" rx="2" ry="2" />
+<text  x="778.49" y="383.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-THE (6 samples, 0.23%)</title><rect x="1187.3" y="805" width="2.7" height="15.0" fill="rgb(237,69,21)" rx="2" ry="2" />
+<text  x="1190.33" y="815.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (99 samples, 3.73%)</title><rect x="756.8" y="501" width="44.0" height="15.0" fill="rgb(241,36,35)" rx="2" ry="2" />
+<text  x="759.83" y="511.5" >(LAM..</text>
+</g>
+<g >
+<title>ADD-SYMBOL (1 samples, 0.04%)</title><rect x="1040.3" y="1285" width="0.4" height="15.0" fill="rgb(224,171,1)" rx="2" ry="2" />
+<text  x="1043.28" y="1295.5" ></text>
+</g>
+<g >
+<title>(FLET SB-IMPL::THUNK :IN SB-INT:%INTERN) (2 samples, 0.08%)</title><rect x="1039.8" y="1301" width="0.9" height="15.0" fill="rgb(242,122,20)" rx="2" ry="2" />
+<text  x="1042.83" y="1311.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::THUNK :IN LOAD) (30 samples, 1.13%)</title><rect x="586.7" y="885" width="13.3" height="15.0" fill="rgb(235,62,42)" rx="2" ry="2" />
+<text  x="589.67" y="895.5" ></text>
+</g>
+<g >
+<title>(FLET SB-THREAD::WITH-RECURSIVE-LOCK-THUNK :IN SB-PCL::INSTALL-OPTIMIZED-CONSTRUCTOR) (15 samples, 0.56%)</title><rect x="1119.8" y="1333" width="6.7" height="15.0" fill="rgb(210,102,10)" rx="2" ry="2" />
+<text  x="1122.80" y="1343.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (23 samples, 0.87%)</title><rect x="1149.1" y="1733" width="10.2" height="15.0" fill="rgb(213,65,49)" rx="2" ry="2" />
+<text  x="1152.13" y="1743.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (18 samples, 0.68%)</title><rect x="1182.0" y="997" width="8.0" height="15.0" fill="rgb(230,191,28)" rx="2" ry="2" />
+<text  x="1185.00" y="1007.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN SB-WALKER::WALK-FORM-INTERNAL) (33 samples, 1.24%)</title><rect x="1063.4" y="1093" width="14.6" height="15.0" fill="rgb(248,193,30)" rx="2" ry="2" />
+<text  x="1066.38" y="1103.5" ></text>
+</g>
+<g >
+<title>NORMALIZE-NAMESTRING (8 samples, 0.30%)</title><rect x="566.7" y="981" width="3.5" height="15.0" fill="rgb(243,71,44)" rx="2" ry="2" />
+<text  x="569.68" y="991.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST::ENSURE-SYSTEM-CDB-FILE (QL-DIST:DIST)) (7 samples, 0.26%)</title><rect x="1156.2" y="1477" width="3.1" height="15.0" fill="rgb(214,129,19)" rx="2" ry="2" />
+<text  x="1159.23" y="1487.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (44 samples, 1.66%)</title><rect x="781.3" y="469" width="19.5" height="15.0" fill="rgb(208,95,54)" rx="2" ry="2" />
+<text  x="784.27" y="479.5" ></text>
+</g>
+<g >
+<title>(SB-C::TOP-LEVEL-FORM (CFFI::NOTICE-FOREIGN-TYPE (QUOTE :INT16) (MAKE-INSTANCE (QUOTE CFFI::FOREIGN-TYPEDEF) :NAME (QUOTE :INT16) :ACTUAL-TYPE CFFI::FOREIGN-BUILT-IN-TYPE))) (78 samples, 2.94%)</title><rect x="996.3" y="1413" width="34.6" height="15.0" fill="rgb(240,123,49)" rx="2" ry="2" />
+<text  x="999.30" y="1423.5" >(S..</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (691 samples, 26.02%)</title><rect x="493.8" y="1381" width="307.0" height="15.0" fill="rgb(238,229,35)" rx="2" ry="2" />
+<text  x="496.82" y="1391.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (13 samples, 0.49%)</title><rect x="1050.5" y="1125" width="5.8" height="15.0" fill="rgb(232,134,39)" rx="2" ry="2" />
+<text  x="1053.50" y="1135.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (21 samples, 0.79%)</title><rect x="1150.0" y="1701" width="9.3" height="15.0" fill="rgb(248,3,39)" rx="2" ry="2" />
+<text  x="1153.02" y="1711.5" ></text>
+</g>
+<g >
+<title>SETQ-VAR (14 samples, 0.53%)</title><rect x="1183.8" y="933" width="6.2" height="15.0" fill="rgb(221,43,3)" rx="2" ry="2" />
+<text  x="1186.78" y="943.5" ></text>
+</g>
+<g >
+<title>(FLET SB-THREAD::WITH-RECURSIVE-LOCK-THUNK :IN SB-PCL::CALL-WITH-ENSURE-CLASS-CONTEXT) (5 samples, 0.19%)</title><rect x="1089.6" y="1301" width="2.2" height="15.0" fill="rgb(208,119,51)" rx="2" ry="2" />
+<text  x="1092.59" y="1311.5" ></text>
+</g>
+<g >
+<title>FD-TYPE (2 samples, 0.08%)</title><rect x="600.9" y="885" width="0.9" height="15.0" fill="rgb(206,229,32)" rx="2" ry="2" />
+<text  x="603.89" y="895.5" ></text>
+</g>
+<g >
+<title>IR1-OPTIMIZE-PHASE-1 (8 samples, 0.30%)</title><rect x="1052.7" y="1013" width="3.6" height="15.0" fill="rgb(219,209,28)" rx="2" ry="2" />
+<text  x="1055.72" y="1023.5" ></text>
+</g>
+<g >
+<title>SIMPLE-EVAL-IN-LEXENV (29 samples, 1.09%)</title><rect x="1177.1" y="1205" width="12.9" height="15.0" fill="rgb(221,53,49)" rx="2" ry="2" />
+<text  x="1180.12" y="1215.5" ></text>
+</g>
+<g >
+<title>TRUENAME (5 samples, 0.19%)</title><rect x="597.8" y="725" width="2.2" height="15.0" fill="rgb(206,124,2)" rx="2" ry="2" />
+<text  x="600.78" y="735.5" ></text>
+</g>
+<g >
+<title>TARGET-MAIN.LISP&quot;) (11 samples, 0.41%)</title><rect x="1121.6" y="1237" width="4.9" height="15.0" fill="rgb(218,187,47)" rx="2" ry="2" />
+<text  x="1124.58" y="1247.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (665 samples, 25.04%)</title><rect x="505.4" y="1349" width="295.4" height="15.0" fill="rgb(246,75,31)" rx="2" ry="2" />
+<text  x="508.37" y="1359.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-..</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (743 samples, 27.97%)</title><rect x="470.7" y="1445" width="330.1" height="15.0" fill="rgb(236,198,21)" rx="2" ry="2" />
+<text  x="473.72" y="1455.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (1,936 samples, 72.89%)</title><rect x="288.1" y="1717" width="860.1" height="15.0" fill="rgb(247,134,45)" rx="2" ry="2" />
+<text  x="291.12" y="1727.5" >(SB-PCL::EMF ASDF/OPERATE:OPERATE)</text>
+</g>
+<g >
+<title>foreign function __getattrlist (1 samples, 0.04%)</title><rect x="1143.8" y="1397" width="0.4" height="15.0" fill="rgb(246,130,38)" rx="2" ry="2" />
+<text  x="1146.80" y="1407.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (21 samples, 0.79%)</title><rect x="1138.5" y="1461" width="9.3" height="15.0" fill="rgb(208,2,33)" rx="2" ry="2" />
+<text  x="1141.46" y="1471.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (26 samples, 0.98%)</title><rect x="789.3" y="325" width="11.5" height="15.0" fill="rgb(218,106,50)" rx="2" ry="2" />
+<text  x="792.26" y="335.5" ></text>
+</g>
+<g >
+<title>MAYBE-SKIP-SHEBANG-LINE (6 samples, 0.23%)</title><rect x="715.1" y="501" width="2.6" height="15.0" fill="rgb(211,3,36)" rx="2" ry="2" />
+<text  x="718.07" y="511.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (8 samples, 0.30%)</title><rect x="444.1" y="1445" width="3.5" height="15.0" fill="rgb(225,1,20)" rx="2" ry="2" />
+<text  x="447.06" y="1455.5" ></text>
+</g>
+<g >
+<title>%COMPILE (11 samples, 0.41%)</title><rect x="1051.4" y="1061" width="4.9" height="15.0" fill="rgb(246,157,35)" rx="2" ry="2" />
+<text  x="1054.39" y="1071.5" ></text>
+</g>
+<g >
+<title>SIMPLE-EVAL-IN-LEXENV (28 samples, 1.05%)</title><rect x="1177.6" y="1189" width="12.4" height="15.0" fill="rgb(219,16,14)" rx="2" ry="2" />
+<text  x="1180.56" y="1199.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (30 samples, 1.13%)</title><rect x="787.5" y="357" width="13.3" height="15.0" fill="rgb(211,35,34)" rx="2" ry="2" />
+<text  x="790.48" y="367.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN (T)) (17 samples, 0.64%)</title><rect x="767.0" y="293" width="7.6" height="15.0" fill="rgb(246,165,26)" rx="2" ry="2" />
+<text  x="770.05" y="303.5" ></text>
+</g>
+<g >
+<title>(LAMBDA (SB-WALKER::REAL-BODY SB-WALKER::REAL-ENV) :IN SB-WALKER::WALK-LET) (25 samples, 0.94%)</title><rect x="1066.9" y="965" width="11.1" height="15.0" fill="rgb(245,28,33)" rx="2" ry="2" />
+<text  x="1069.94" y="975.5" ></text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (2 samples, 0.08%)</title><rect x="1107.8" y="1365" width="0.9" height="15.0" fill="rgb(211,7,43)" rx="2" ry="2" />
+<text  x="1110.81" y="1375.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (613 samples, 23.08%)</title><rect x="528.5" y="1285" width="272.3" height="15.0" fill="rgb(219,158,15)" rx="2" ry="2" />
+<text  x="531.47" y="1295.5" >(LAMBDA NIL :IN ASDF/ACTION:CALL-WHI..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOAD-ASD) (63 samples, 2.37%)</title><rect x="1162.0" y="1749" width="28.0" height="15.0" fill="rgb(225,26,7)" rx="2" ry="2" />
+<text  x="1165.01" y="1759.5" >(..</text>
+</g>
+<g >
+<title>PROBE-FILE* (6 samples, 0.23%)</title><rect x="593.8" y="741" width="2.6" height="15.0" fill="rgb(239,1,26)" rx="2" ry="2" />
+<text  x="596.78" y="751.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/COMPONENT:FIND-COMPONENT (STRING T)) (27 samples, 1.02%)</title><rect x="705.7" y="837" width="12.0" height="15.0" fill="rgb(206,142,36)" rx="2" ry="2" />
+<text  x="708.74" y="847.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/SYSTEM:FIND-SYSTEM) (53 samples, 2.00%)</title><rect x="1166.5" y="1589" width="23.5" height="15.0" fill="rgb(228,85,52)" rx="2" ry="2" />
+<text  x="1169.45" y="1599.5" >(..</text>
+</g>
+<g >
+<title>ANSI-STREAM-READ-N-BYTES (4 samples, 0.15%)</title><rect x="1106.9" y="1397" width="1.8" height="15.0" fill="rgb(214,9,41)" rx="2" ry="2" />
+<text  x="1109.92" y="1407.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (9 samples, 0.34%)</title><rect x="1027.0" y="277" width="3.9" height="15.0" fill="rgb(234,98,32)" rx="2" ry="2" />
+<text  x="1029.95" y="287.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (59 samples, 2.22%)</title><rect x="575.6" y="1029" width="26.2" height="15.0" fill="rgb(226,50,15)" rx="2" ry="2" />
+<text  x="578.56" y="1039.5" >(..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (877 samples, 33.02%)</title><rect x="411.2" y="1589" width="389.6" height="15.0" fill="rgb(241,98,27)" rx="2" ry="2" />
+<text  x="414.18" y="1599.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION)</text>
+</g>
+<g >
+<title>CHECKING-MISS (13 samples, 0.49%)</title><rect x="1080.7" y="1317" width="5.8" height="15.0" fill="rgb(215,48,20)" rx="2" ry="2" />
+<text  x="1083.71" y="1327.5" ></text>
+</g>
+<g >
+<title>WALK-FORM-INTERNAL (29 samples, 1.09%)</title><rect x="1065.2" y="1029" width="12.8" height="15.0" fill="rgb(235,86,39)" rx="2" ry="2" />
+<text  x="1068.16" y="1039.5" ></text>
+</g>
+<g >
+<title>CACHE-MISS-VALUES (48 samples, 1.81%)</title><rect x="1056.7" y="1333" width="21.3" height="15.0" fill="rgb(208,132,54)" rx="2" ry="2" />
+<text  x="1059.72" y="1343.5" >C..</text>
+</g>
+<g >
+<title>IR1-CONVERT-LAMBDA-BODY (33 samples, 1.24%)</title><rect x="1016.3" y="661" width="14.6" height="15.0" fill="rgb(249,102,5)" rx="2" ry="2" />
+<text  x="1019.29" y="671.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (14 samples, 0.53%)</title><rect x="675.5" y="821" width="6.2" height="15.0" fill="rgb(246,183,16)" rx="2" ry="2" />
+<text  x="678.53" y="831.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (3 samples, 0.11%)</title><rect x="1128.7" y="1413" width="1.3" height="15.0" fill="rgb(239,168,6)" rx="2" ry="2" />
+<text  x="1131.69" y="1423.5" ></text>
+</g>
+<g >
+<title>TARGET-MAIN.LISP&quot;) (10 samples, 0.38%)</title><rect x="1073.6" y="693" width="4.4" height="15.0" fill="rgb(229,88,40)" rx="2" ry="2" />
+<text  x="1076.60" y="703.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (652 samples, 24.55%)</title><rect x="511.1" y="1333" width="289.7" height="15.0" fill="rgb(243,144,34)" rx="2" ry="2" />
+<text  x="514.14" y="1343.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACT..</text>
+</g>
+<g >
+<title>(LAMBDA (SB-PCL::F SB-PCL::C SB-PCL::E) :IN SB-PCL::COMPUTE-CONSTANTS) (20 samples, 0.75%)</title><rect x="1069.2" y="885" width="8.8" height="15.0" fill="rgb(218,188,48)" rx="2" ry="2" />
+<text  x="1072.16" y="895.5" ></text>
+</g>
+<g >
+<title>CONSTRAIN-REF-TYPE (3 samples, 0.11%)</title><rect x="1054.9" y="933" width="1.4" height="15.0" fill="rgb(227,166,46)" rx="2" ry="2" />
+<text  x="1057.94" y="943.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (12 samples, 0.45%)</title><rect x="676.4" y="789" width="5.3" height="15.0" fill="rgb(239,203,54)" rx="2" ry="2" />
+<text  x="679.42" y="799.5" ></text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (68 samples, 2.56%)</title><rect x="571.6" y="1077" width="30.2" height="15.0" fill="rgb(207,209,34)" rx="2" ry="2" />
+<text  x="574.57" y="1087.5" >(F..</text>
+</g>
+<g >
+<title>COMPUTE-ACTION-STATUS (11 samples, 0.41%)</title><rect x="565.3" y="1029" width="4.9" height="15.0" fill="rgb(215,144,50)" rx="2" ry="2" />
+<text  x="568.35" y="1039.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-36&quot; :IN SB-THREAD::CALL-WITH-SYSTEM-MUTEX/WITHOUT-GCING) (5 samples, 0.19%)</title><rect x="1104.7" y="1349" width="2.2" height="15.0" fill="rgb(222,34,43)" rx="2" ry="2" />
+<text  x="1107.70" y="1359.5" ></text>
+</g>
+<g >
+<title>REQUIRE (14 samples, 0.53%)</title><rect x="860.8" y="1525" width="6.2" height="15.0" fill="rgb(248,217,29)" rx="2" ry="2" />
+<text  x="863.79" y="1535.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (7 samples, 0.26%)</title><rect x="1027.8" y="245" width="3.1" height="15.0" fill="rgb(244,74,50)" rx="2" ry="2" />
+<text  x="1030.84" y="255.5" ></text>
+</g>
+<g >
+<title>REFILL-INPUT-BUFFER (2 samples, 0.08%)</title><rect x="995.4" y="1269" width="0.9" height="15.0" fill="rgb(239,154,34)" rx="2" ry="2" />
+<text  x="998.41" y="1279.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (28 samples, 1.05%)</title><rect x="788.4" y="341" width="12.4" height="15.0" fill="rgb(224,127,53)" rx="2" ry="2" />
+<text  x="791.37" y="351.5" ></text>
+</g>
+<g >
+<title>%DO-FORMS-FROM-INFO (26 samples, 0.98%)</title><rect x="588.4" y="853" width="11.6" height="15.0" fill="rgb(249,148,46)" rx="2" ry="2" />
+<text  x="591.45" y="863.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (17 samples, 0.64%)</title><rect x="859.5" y="1573" width="7.5" height="15.0" fill="rgb(209,44,40)" rx="2" ry="2" />
+<text  x="862.46" y="1583.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (48 samples, 1.81%)</title><rect x="1009.6" y="901" width="21.3" height="15.0" fill="rgb(230,47,34)" rx="2" ry="2" />
+<text  x="1012.62" y="911.5" >I..</text>
+</g>
+<g >
+<title>RESOLVE-DEPENDENCY-NAME (47 samples, 1.77%)</title><rect x="760.4" y="469" width="20.9" height="15.0" fill="rgb(254,169,3)" rx="2" ry="2" />
+<text  x="763.38" y="479.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE (ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (49 samples, 1.84%)</title><rect x="1168.2" y="1525" width="21.8" height="15.0" fill="rgb(230,133,8)" rx="2" ry="2" />
+<text  x="1171.23" y="1535.5" >(..</text>
+</g>
+<g >
+<title>foreign function __open (1 samples, 0.04%)</title><rect x="1147.8" y="1477" width="0.4" height="15.0" fill="rgb(215,114,25)" rx="2" ry="2" />
+<text  x="1150.79" y="1487.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE (26 samples, 0.98%)</title><rect x="1136.2" y="1477" width="11.6" height="15.0" fill="rgb(237,161,29)" rx="2" ry="2" />
+<text  x="1139.24" y="1487.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (62 samples, 2.33%)</title><rect x="1003.4" y="1125" width="27.5" height="15.0" fill="rgb(250,221,9)" rx="2" ry="2" />
+<text  x="1006.40" y="1135.5" >I..</text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-2&quot; :IN QL-CDB::%LOOKUP) (4 samples, 0.15%)</title><rect x="607.6" y="965" width="1.7" height="15.0" fill="rgb(222,152,50)" rx="2" ry="2" />
+<text  x="610.55" y="975.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (21 samples, 0.79%)</title><rect x="708.4" y="741" width="9.3" height="15.0" fill="rgb(254,187,33)" rx="2" ry="2" />
+<text  x="711.40" y="751.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (2,150 samples, 80.95%)</title><rect x="204.1" y="1781" width="955.2" height="15.0" fill="rgb(237,146,49)" rx="2" ry="2" />
+<text  x="207.15" y="1791.5" >(LAMBDA NIL :IN ASDF/OPERATE:OPERATE)</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE:CREATE-SCANNER (T)) (18 samples, 0.68%)</title><rect x="1078.5" y="1397" width="8.0" height="15.0" fill="rgb(205,125,40)" rx="2" ry="2" />
+<text  x="1081.49" y="1407.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (704 samples, 26.51%)</title><rect x="488.0" y="1397" width="312.8" height="15.0" fill="rgb(220,164,40)" rx="2" ry="2" />
+<text  x="491.04" y="1407.5" >(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION)</text>
+</g>
+<g >
+<title>(LABELS SB-PCL::DO-METHODS :IN SB-PCL::GENERATE-DISCRIMINATION-NET-INTERNAL) (5 samples, 0.19%)</title><rect x="1084.3" y="1189" width="2.2" height="15.0" fill="rgb(206,133,4)" rx="2" ry="2" />
+<text  x="1087.26" y="1199.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/FIND-SYSTEM:LOCATE-SYSTEM) (17 samples, 0.64%)</title><rect x="601.8" y="1173" width="7.5" height="15.0" fill="rgb(229,177,22)" rx="2" ry="2" />
+<text  x="604.78" y="1183.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT-PROGN-BODY (41 samples, 1.54%)</title><rect x="1012.7" y="789" width="18.2" height="15.0" fill="rgb(211,216,40)" rx="2" ry="2" />
+<text  x="1015.73" y="799.5" ></text>
+</g>
+<g >
+<title>FUN-NAME-LEAF (57 samples, 2.15%)</title><rect x="1005.6" y="1045" width="25.3" height="15.0" fill="rgb(249,23,0)" rx="2" ry="2" />
+<text  x="1008.62" y="1055.5" >F..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T)) (2,030 samples, 76.43%)</title><rect x="246.4" y="1749" width="901.8" height="15.0" fill="rgb(219,199,37)" rx="2" ry="2" />
+<text  x="249.36" y="1759.5" >(SB-PCL::FAST-METHOD ASDF/OPERATE:OPERATE :AROUND (T T))</text>
+</g>
+<g >
+<title>LOAD-FASL-GROUP (321 samples, 12.09%)</title><rect x="983.9" y="1429" width="142.6" height="15.0" fill="rgb(251,104,54)" rx="2" ry="2" />
+<text  x="986.86" y="1439.5" >LOAD-FASL-GROUP</text>
+</g>
+<g >
+<title>(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT) (70 samples, 2.64%)</title><rect x="999.8" y="1285" width="31.1" height="15.0" fill="rgb(220,97,9)" rx="2" ry="2" />
+<text  x="1002.85" y="1295.5" >(F..</text>
+</g>
+<g >
+<title>PROBE-FILE (5 samples, 0.19%)</title><rect x="679.5" y="677" width="2.2" height="15.0" fill="rgb(231,100,18)" rx="2" ry="2" />
+<text  x="682.53" y="687.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-RECURSIVE-LOCK (17 samples, 0.64%)</title><rect x="1118.9" y="1365" width="7.6" height="15.0" fill="rgb(247,29,27)" rx="2" ry="2" />
+<text  x="1121.92" y="1375.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-DIST:PREFERENCE (T)) (3 samples, 0.11%)</title><rect x="686.2" y="757" width="1.3" height="15.0" fill="rgb(216,102,21)" rx="2" ry="2" />
+<text  x="689.19" y="767.5" ></text>
+</g>
+<g >
+<title>%PROCESSING-DECLS (24 samples, 0.90%)</title><rect x="1020.3" y="517" width="10.6" height="15.0" fill="rgb(210,118,11)" rx="2" ry="2" />
+<text  x="1023.29" y="527.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:PERFORM-WITH-RESTARTS (ASDF/LISP-ACTION:LOAD-OP ASDF/LISP-ACTION:CL-SOURCE-FILE)) (633 samples, 23.83%)</title><rect x="867.0" y="1573" width="281.2" height="15.0" fill="rgb(224,167,46)" rx="2" ry="2" />
+<text  x="870.01" y="1583.5" >(SB-PCL::FAST-METHOD ASDF/ACTION:PERF..</text>
+</g>
+<g >
+<title>CONSULT-ASDF-CACHE (65 samples, 2.45%)</title><rect x="1161.1" y="1781" width="28.9" height="15.0" fill="rgb(251,114,29)" rx="2" ry="2" />
+<text  x="1164.12" y="1791.5" >CO..</text>
+</g>
+<g >
+<title>LTN-ANALYZE (7 samples, 0.26%)</title><rect x="1123.4" y="1173" width="3.1" height="15.0" fill="rgb(236,83,2)" rx="2" ry="2" />
+<text  x="1126.36" y="1183.5" ></text>
+</g>
+<g >
+<title>FOP.LISP&quot;) (7 samples, 0.26%)</title><rect x="993.2" y="1381" width="3.1" height="15.0" fill="rgb(235,22,52)" rx="2" ry="2" />
+<text  x="996.19" y="1391.5" ></text>
+</g>
+<g >
+<title>FD-STREAM-READ-N-BYTES (3 samples, 0.11%)</title><rect x="716.4" y="453" width="1.3" height="15.0" fill="rgb(206,160,43)" rx="2" ry="2" />
+<text  x="719.40" y="463.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/PLAN:TRAVERSE-ACTION) (32 samples, 1.20%)</title><rect x="786.6" y="373" width="14.2" height="15.0" fill="rgb(216,8,20)" rx="2" ry="2" />
+<text  x="789.60" y="383.5" ></text>
+</g>
+<g >
+<title>QUERY-FILE-SYSTEM (4 samples, 0.15%)</title><rect x="799.0" y="181" width="1.8" height="15.0" fill="rgb(245,217,35)" rx="2" ry="2" />
+<text  x="802.04" y="191.5" ></text>
+</g>
+<g >
+<title>IS-OK-TEMPLATE-USE (3 samples, 0.11%)</title><rect x="1125.1" y="1109" width="1.4" height="15.0" fill="rgb(243,11,3)" rx="2" ry="2" />
+<text  x="1128.14" y="1119.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/ACTION:COMPUTE-ACTION-STAMP (T ASDF/OPERATION:OPERATION ASDF/COMPONENT:COMPONENT)) (21 samples, 0.79%)</title><rect x="910.5" y="1509" width="9.4" height="15.0" fill="rgb(246,225,7)" rx="2" ry="2" />
+<text  x="913.55" y="1519.5" ></text>
+</g>
+<g >
+<title>%QUERY-FILE-SYSTEM (3 samples, 0.11%)</title><rect x="794.6" y="165" width="1.3" height="15.0" fill="rgb(243,198,14)" rx="2" ry="2" />
+<text  x="797.59" y="175.5" ></text>
+</g>
+<g >
+<title>(LABELS SB-IMPL::RECUR :IN SB-IMPL::STABLE-SORT-LIST) (5 samples, 0.19%)</title><rect x="685.3" y="789" width="2.2" height="15.0" fill="rgb(223,7,49)" rx="2" ry="2" />
+<text  x="688.30" y="799.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (7 samples, 0.26%)</title><rect x="678.6" y="709" width="3.1" height="15.0" fill="rgb(240,196,45)" rx="2" ry="2" />
+<text  x="681.64" y="719.5" ></text>
+</g>
+<g >
+<title>MAKE-FUNCTIONAL-FROM-TOPLEVEL-LAMBDA (22 samples, 0.83%)</title><rect x="1180.2" y="1061" width="9.8" height="15.0" fill="rgb(220,147,3)" rx="2" ry="2" />
+<text  x="1183.23" y="1071.5" ></text>
+</g>
+<g >
+<title>OPEN (2 samples, 0.08%)</title><rect x="686.6" y="741" width="0.9" height="15.0" fill="rgb(234,30,2)" rx="2" ry="2" />
+<text  x="689.63" y="751.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE (6 samples, 0.23%)</title><rect x="651.1" y="965" width="2.7" height="15.0" fill="rgb(211,96,32)" rx="2" ry="2" />
+<text  x="654.09" y="975.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (135 samples, 5.08%)</title><rect x="740.8" y="645" width="60.0" height="15.0" fill="rgb(223,120,7)" rx="2" ry="2" />
+<text  x="743.84" y="655.5" >(LAMBD..</text>
+</g>
+<g >
+<title>CALL-WITH-PACKAGE-GRAPH (5 samples, 0.19%)</title><rect x="1038.5" y="1349" width="2.2" height="15.0" fill="rgb(225,144,37)" rx="2" ry="2" />
+<text  x="1041.50" y="1359.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (38 samples, 1.43%)</title><rect x="783.9" y="421" width="16.9" height="15.0" fill="rgb(250,132,46)" rx="2" ry="2" />
+<text  x="786.93" y="431.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::EMF ASDF/OPERATE:OPERATE) (17 samples, 0.64%)</title><rect x="674.2" y="869" width="7.5" height="15.0" fill="rgb(242,175,35)" rx="2" ry="2" />
+<text  x="677.19" y="879.5" ></text>
+</g>
+<g >
+<title>SEARCH-FOR-SYSTEM-DEFINITION (16 samples, 0.60%)</title><rect x="602.2" y="1157" width="7.1" height="15.0" fill="rgb(230,90,50)" rx="2" ry="2" />
+<text  x="605.22" y="1167.5" ></text>
+</g>
+<g >
+<title>GET-SECONDARY-DISPATCH-FUNCTION1 (17 samples, 0.64%)</title><rect x="1070.5" y="837" width="7.5" height="15.0" fill="rgb(215,33,3)" rx="2" ry="2" />
+<text  x="1073.49" y="847.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (795 samples, 29.93%)</title><rect x="447.6" y="1509" width="353.2" height="15.0" fill="rgb(242,168,42)" rx="2" ry="2" />
+<text  x="450.61" y="1519.5" >MAP-DIRECT-DEPENDENCIES</text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (143 samples, 5.38%)</title><rect x="737.3" y="677" width="63.5" height="15.0" fill="rgb(206,159,1)" rx="2" ry="2" />
+<text  x="740.28" y="687.5" >MAP-DI..</text>
+</g>
+<g >
+<title>COMPUTE-ACTION-STATUS (11 samples, 0.41%)</title><rect x="795.9" y="293" width="4.9" height="15.0" fill="rgb(220,62,52)" rx="2" ry="2" />
+<text  x="798.93" y="303.5" ></text>
+</g>
+<g >
+<title>FAST-READ-BYTE-REFILL (16 samples, 0.60%)</title><rect x="1110.5" y="1397" width="7.1" height="15.0" fill="rgb(224,18,15)" rx="2" ry="2" />
+<text  x="1113.47" y="1407.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;CLEANUP-FUN-9&quot; :IN SB-IMPL::RELEASE-FD-STREAM-RESOURCES) (1 samples, 0.04%)</title><rect x="608.9" y="917" width="0.4" height="15.0" fill="rgb(242,204,39)" rx="2" ry="2" />
+<text  x="611.89" y="927.5" ></text>
+</g>
+<g >
+<title>(FLET SB-FASL::LOAD-STREAM :IN LOAD) (405 samples, 15.25%)</title><rect x="946.5" y="1493" width="180.0" height="15.0" fill="rgb(221,47,53)" rx="2" ry="2" />
+<text  x="949.54" y="1503.5" >(FLET SB-FASL::LOAD-STR..</text>
+</g>
+<g >
+<title>(FLET &quot;WITHOUT-INTERRUPTS-BODY-29&quot; :IN SB-THREAD::CALL-WITH-RECURSIVE-LOCK) (8 samples, 0.30%)</title><rect x="1034.1" y="1333" width="3.5" height="15.0" fill="rgb(245,228,43)" rx="2" ry="2" />
+<text  x="1037.06" y="1343.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (16 samples, 0.60%)</title><rect x="1023.8" y="389" width="7.1" height="15.0" fill="rgb(208,89,32)" rx="2" ry="2" />
+<text  x="1026.84" y="399.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD QL-IMPL-UTIL::%CALL-WITH-QUIET-COMPILATION :AROUND (QL-IMPL:SBCL T)) (2,558 samples, 96.31%)</title><rect x="53.5" y="1893" width="1136.5" height="15.0" fill="rgb(243,156,16)" rx="2" ry="2" />
+<text  x="56.54" y="1903.5" >(SB-PCL::FAST-METHOD QL-IMPL-UTIL::%CALL-WITH-QUIET-COMPILATION :AROUND (QL-IMPL:SBCL T))</text>
+</g>
+<g >
+<title>foreign function stat$INODE64 (1 samples, 0.04%)</title><rect x="1158.9" y="1381" width="0.4" height="15.0" fill="rgb(216,190,44)" rx="2" ry="2" />
+<text  x="1161.90" y="1391.5" ></text>
+</g>
+<g >
+<title>%COMPILE (9 samples, 0.34%)</title><rect x="1074.0" y="677" width="4.0" height="15.0" fill="rgb(240,29,38)" rx="2" ry="2" />
+<text  x="1077.04" y="687.5" ></text>
+</g>
+<g >
+<title>GET-FUN1 (15 samples, 0.56%)</title><rect x="1071.4" y="805" width="6.6" height="15.0" fill="rgb(205,154,32)" rx="2" ry="2" />
+<text  x="1074.38" y="815.5" ></text>
+</g>
+<g >
+<title>MAKE-FUNCTIONAL-FROM-TOPLEVEL-LAMBDA (67 samples, 2.52%)</title><rect x="1001.2" y="1205" width="29.7" height="15.0" fill="rgb(250,174,2)" rx="2" ry="2" />
+<text  x="1004.18" y="1215.5" >MA..</text>
+</g>
+<g >
+<title>UNIX-STAT (2 samples, 0.08%)</title><rect x="599.1" y="677" width="0.9" height="15.0" fill="rgb(252,226,29)" rx="2" ry="2" />
+<text  x="602.11" y="687.5" ></text>
+</g>
+<g >
+<title>TRUENAMIZE (7 samples, 0.26%)</title><rect x="593.3" y="757" width="3.1" height="15.0" fill="rgb(225,103,44)" rx="2" ry="2" />
+<text  x="596.34" y="767.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-CONSISTENT-DISTS (2,656 samples, 100.00%)</title><rect x="10.0" y="1925" width="1180.0" height="15.0" fill="rgb(212,56,4)" rx="2" ry="2" />
+<text  x="13.00" y="1935.5" >CALL-WITH-CONSISTENT-DISTS</text>
+</g>
+<g >
+<title>SIMPLE-EVAL-IN-LEXENV (18 samples, 0.68%)</title><rect x="592.0" y="789" width="8.0" height="15.0" fill="rgb(210,156,24)" rx="2" ry="2" />
+<text  x="595.00" y="799.5" ></text>
+</g>
+<g >
+<title>PROBE-FILE* (7 samples, 0.26%)</title><rect x="650.6" y="981" width="3.2" height="15.0" fill="rgb(226,7,21)" rx="2" ry="2" />
+<text  x="653.65" y="991.5" ></text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/ACTION:CALL-WHILE-VISITING-ACTION) (317 samples, 11.94%)</title><rect x="660.0" y="1029" width="140.8" height="15.0" fill="rgb(232,119,14)" rx="2" ry="2" />
+<text  x="662.98" y="1039.5" >(LAMBDA NIL :IN A..</text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (53 samples, 2.00%)</title><rect x="1007.4" y="981" width="23.5" height="15.0" fill="rgb(231,71,11)" rx="2" ry="2" />
+<text  x="1010.40" y="991.5" >I..</text>
+</g>
+<g >
+<title>foreign function sb_realpath (2 samples, 0.08%)</title><rect x="652.9" y="901" width="0.9" height="15.0" fill="rgb(235,145,54)" rx="2" ry="2" />
+<text  x="655.87" y="911.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (187 samples, 7.04%)</title><rect x="717.7" y="853" width="83.1" height="15.0" fill="rgb(234,156,3)" rx="2" ry="2" />
+<text  x="720.73" y="863.5" >TRAVERSE-..</text>
+</g>
+<g >
+<title>(FLET SB-FASL::THUNK :IN LOAD) (6 samples, 0.23%)</title><rect x="771.9" y="117" width="2.7" height="15.0" fill="rgb(210,163,6)" rx="2" ry="2" />
+<text  x="774.94" y="127.5" ></text>
+</g>
+<g >
+<title>IR1-CONVERT (5 samples, 0.19%)</title><rect x="1028.7" y="213" width="2.2" height="15.0" fill="rgb(243,127,31)" rx="2" ry="2" />
+<text  x="1031.73" y="223.5" ></text>
+</g>
+<g >
+<title>%WITH-STANDARD-IO-SYNTAX (12 samples, 0.45%)</title><rect x="769.3" y="213" width="5.3" height="15.0" fill="rgb(241,211,37)" rx="2" ry="2" />
+<text  x="772.27" y="223.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AROUND (T)) (782 samples, 29.44%)</title><rect x="800.8" y="1637" width="347.4" height="15.0" fill="rgb(215,200,52)" rx="2" ry="2" />
+<text  x="803.81" y="1647.5" >(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN :AR..</text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE::CONVERT-COMPOUND-PARSE-TREE ((EQL :GROUP) T)) (25 samples, 0.94%)</title><rect x="1045.2" y="1317" width="11.1" height="15.0" fill="rgb(211,93,29)" rx="2" ry="2" />
+<text  x="1048.17" y="1327.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-ASDF-SESSION (66 samples, 2.48%)</title><rect x="1160.7" y="1797" width="29.3" height="15.0" fill="rgb(221,145,19)" rx="2" ry="2" />
+<text  x="1163.68" y="1807.5" >CA..</text>
+</g>
+<g >
+<title>COMPILE (72 samples, 2.71%)</title><rect x="999.0" y="1317" width="31.9" height="15.0" fill="rgb(219,39,42)" rx="2" ry="2" />
+<text  x="1001.96" y="1327.5" >CO..</text>
+</g>
+<g >
+<title>IR1-CONVERT-AUX-BINDINGS (13 samples, 0.49%)</title><rect x="1025.2" y="341" width="5.7" height="15.0" fill="rgb(216,87,49)" rx="2" ry="2" />
+<text  x="1028.17" y="351.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-MUFFLED-CONDITIONS (514 samples, 19.35%)</title><rect x="919.9" y="1525" width="228.3" height="15.0" fill="rgb(254,75,4)" rx="2" ry="2" />
+<text  x="922.88" y="1535.5" >CALL-WITH-MUFFLED-CONDITIONS</text>
+</g>
+<g >
+<title>COMPILE (13 samples, 0.49%)</title><rect x="1072.3" y="773" width="5.7" height="15.0" fill="rgb(215,49,0)" rx="2" ry="2" />
+<text  x="1075.27" y="783.5" ></text>
+</g>
+<g >
+<title>%LOOKUP (5 samples, 0.19%)</title><rect x="779.0" y="245" width="2.3" height="15.0" fill="rgb(240,188,35)" rx="2" ry="2" />
+<text  x="782.04" y="255.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD CL-PPCRE:CREATE-SCANNER (STRING)) (82 samples, 3.09%)</title><rect x="1041.6" y="1397" width="36.4" height="15.0" fill="rgb(242,11,3)" rx="2" ry="2" />
+<text  x="1044.61" y="1407.5" >(SB..</text>
+</g>
+<g >
+<title>TRUENAME* (6 samples, 0.23%)</title><rect x="597.3" y="741" width="2.7" height="15.0" fill="rgb(233,146,44)" rx="2" ry="2" />
+<text  x="600.33" y="751.5" ></text>
+</g>
+<g >
+<title>FOP-WORD-INTEGER (20 samples, 0.75%)</title><rect x="1108.7" y="1413" width="8.9" height="15.0" fill="rgb(211,177,45)" rx="2" ry="2" />
+<text  x="1111.70" y="1423.5" ></text>
+</g>
+<g >
+<title>(FLET &quot;WRAPPER4&quot; :IN REQUIRE) (12 samples, 0.45%)</title><rect x="861.7" y="1493" width="5.3" height="15.0" fill="rgb(227,52,38)" rx="2" ry="2" />
+<text  x="864.68" y="1503.5" ></text>
+</g>
+<g >
+<title>TRAVERSE-ACTION (123 samples, 4.63%)</title><rect x="746.2" y="597" width="54.6" height="15.0" fill="rgb(248,215,2)" rx="2" ry="2" />
+<text  x="749.17" y="607.5" >TRAVE..</text>
+</g>
+<g >
+<title>(LAMBDA NIL :IN ASDF/OPERATE:OPERATE) (58 samples, 2.18%)</title><rect x="1164.2" y="1669" width="25.8" height="15.0" fill="rgb(243,72,27)" rx="2" ry="2" />
+<text  x="1167.23" y="1679.5" >(..</text>
+</g>
+<g >
+<title>CALL-WITH-LOAD-BINDINGS (8 samples, 0.30%)</title><rect x="863.5" y="1429" width="3.5" height="15.0" fill="rgb(227,190,6)" rx="2" ry="2" />
+<text  x="866.46" y="1439.5" ></text>
+</g>
+<g >
+<title>MAP-DIRECT-DEPENDENCIES (127 samples, 4.78%)</title><rect x="744.4" y="613" width="56.4" height="15.0" fill="rgb(223,99,5)" rx="2" ry="2" />
+<text  x="747.39" y="623.5" >MAP-D..</text>
+</g>
+<g >
+<title>ENSURE-CLASS (11 samples, 0.41%)</title><rect x="1086.9" y="1397" width="4.9" height="15.0" fill="rgb(244,163,52)" rx="2" ry="2" />
+<text  x="1089.93" y="1407.5" ></text>
+</g>
+<g >
+<title>CALL-WITH-ASDF-SESSION (60 samples, 2.26%)</title><rect x="1163.3" y="1701" width="26.7" height="15.0" fill="rgb(215,84,18)" rx="2" ry="2" />
+<text  x="1166.34" y="1711.5" >C..</text>
+</g>
+<g >
+<title>(LAMBDA (&amp;REST SB-PCL::ARGS) :IN SB-PCL::INSTALL-INITIAL-CONSTRUCTOR) (19 samples, 0.72%)</title><rect x="1118.0" y="1397" width="8.5" height="15.0" fill="rgb(251,45,53)" rx="2" ry="2" />
+<text  x="1121.03" y="1407.5" ></text>
+</g>
+<g >
+<title>CONVERT (17 samples, 0.64%)</title><rect x="1078.9" y="1381" width="7.6" height="15.0" fill="rgb(225,42,22)" rx="2" ry="2" />
+<text  x="1081.93" y="1391.5" ></text>
+</g>
+<g >
+<title>(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLAN (T)) (716 samples, 26.96%)</title><rect x="830.1" y="1605" width="318.1" height="15.0" fill="rgb(231,206,28)" rx="2" ry="2" />
+<text  x="833.14" y="1615.5" >(SB-PCL::FAST-METHOD ASDF/PLAN:PERFORM-PLA..</text>
+</g>
+</g>
+</svg>

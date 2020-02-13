@@ -4,7 +4,7 @@
 
 Flamegraphs are a cool way to search for hotspots in your code.
 
-[[images/quickload.png]]
+[[images/quickload.svg]]
 
 ** Installation
 

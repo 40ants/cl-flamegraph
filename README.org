@@ -1,0 +1,81 @@
+* cl-flamegraph
+
+** Rationale
+
+Flamegraphs are a cool way to search for hotspots in your code.
+
+[[images/quickload.png]]
+
+** Installation
+
+Setup an [[https://ultralisp.org][Ultralisp.org]] distribution:
+
+#+BEGIN_SRC lisp
+
+(ql-dist:install-dist "http://dist.ultralisp.org/"
+                      :prompt nil)
+
+#+END_SRC
+
+Or clone repository to your *~/quicklisp/local-projects* folder.
+
+Then install the system:
+
+#+BEGIN_SRC lisp
+
+(ql:quickload :flamegraph)
+
+#+END_SRC
+
+Download a [[https://github.com/brendangregg/FlameGraph][FlameGraph chart generator]]. It is written in Perl. This
+system prepares a data in simple text format and this file should be
+processed by the *flamegraph.pl* to generate SVG file with the diagram.
+
+** Usage
+
+Wrap the code with *flamegraph:save-flame-graph* macro:
+
+#+BEGIN_SRC lisp
+CL-USER> (defun foo ()
+           (sleep 0.01))
+FOO
+CL-USER> (defun bar ()
+           (sleep 0.05))
+BAR
+CL-USER> (defun blah ()
+           (loop repeat 1000
+                 do (foo)
+                    (bar)))
+BLAH
+CL-USER> (flamegraph:save-flame-graph ("/tmp/foo.stack")
+           (blah))
+; No values
+#+END_SRC
+
+This will generate a file with the content:
+
+#+BEGIN_SRC text
+BLAH 8
+BLAH;BAR 5
+BLAH;BAR;NANOSLEEP 5
+BLAH;BAR;NANOSLEEP;foreign function __syscall 2
+BLAH;BAR;NANOSLEEP;foreign function sb_nanosleep 3
+BLAH;BAR;NANOSLEEP;foreign function sb_nanosleep;foreign function clock_get_time 3
+BLAH;BAR;NANOSLEEP;foreign function sb_nanosleep;foreign function clock_get_time;foreign function mach_msg_trap 3
+BLAH;FOO 3
+BLAH;FOO;NANOSLEEP 3
+BLAH;FOO;NANOSLEEP;foreign function __syscall 1
+BLAH;FOO;NANOSLEEP;foreign function sb_nanosleep 2
+BLAH;FOO;NANOSLEEP;foreign function sb_nanosleep;foreign function clock_get_time 2
+BLAH;FOO;NANOSLEEP;foreign function sb_nanosleep;foreign function clock_get_time;foreign function mach_msg_trap 2
+#+END_SRC
+
+Pipe it through *flamegraph.pl* to get a nice SVG:
+
+#+BEGIN_SRC sh
+cat /tmp/foo.stack | flamegraph.pl > /tmp/foo.svg
+#+END_SRC
+
+And here is the result:
+
+[[images/foo.svg]]

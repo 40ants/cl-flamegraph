@@ -84,3 +84,8 @@ cat /tmp/foo.stack | flamegraph.pl > /tmp/foo.svg
 And here is the result:
 
 [[images/foo.svg]]
+** Similar projects
+*** [[https://github.com/scymtym/clim.flamegraph/tree/future][clim.flamegraph]] - SBCL's sprof flamegraph inspector with it's own UI built with McClim.
+*** [[https://github.com/TeMPOraL/tracer][TeMPOraL's tracer]] - a hack on SBCL's tracing implementation which is able to produce data for loading into  Chrome's *chrome://tracing* tool.
+*** [[https://mr.gy/blog/sam.html][SAM]] - Simple sampling profiler for ClozureCL. Without graphical interface.
+*** [[https://github.com/svspire/ccl-metering][ccl-metering]] - a tool similar to TeMPOraL's tracer, but for ClozureCL and without any graphical interface.

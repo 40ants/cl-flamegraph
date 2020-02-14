@@ -6,6 +6,8 @@ Flamegraphs are a cool way to search for hotspots in your code.
 
 [[images/quickload.svg]]
 
+[[images/speedscope-flamegraph.gif]]
+
 ** Installation
 
 Setup an [[https://ultralisp.org][Ultralisp.org]] distribution:
@@ -30,6 +32,9 @@ Then install the system:
 Download a [[https://github.com/brendangregg/FlameGraph][FlameGraph chart generator]]. It is written in Perl. This
 system prepares a data in simple text format and this file should be
 processed by the *flamegraph.pl* to generate SVG file with the diagram.
+
+Or you can upload results to the [[https://speedscope.app][Speedscope.app]] site and inspect it in
+the browser!
 
 ** Usage
 

@@ -127,10 +127,15 @@
 
 
 (defmacro save-flame-graph ((filename &rest sb-sprof-opts) &body body)
-  `(let ((*frame-where-profiling-was-started*
-           (sb-di:top-frame)))
-     (sb-sprof:with-profiling (,@sb-sprof-opts)
-       ,@body)
-     (alexandria:with-output-to-file (s ,filename :if-exists :supersede)
-       (print-graph (make-graph)
-                    :stream s))))
+  (alexandria:with-gensyms (result-var)
+    `(let ((*frame-where-profiling-was-started*
+             (sb-di:top-frame))
+           (,result-var nil))
+       (sb-sprof:with-profiling (,@sb-sprof-opts)
+         (setf ,result-var
+               (multiple-value-list
+                (progn ,@body))))
+       (alexandria:with-output-to-file (s ,filename :if-exists :supersede)
+         (print-graph (make-graph)
+                      :stream s))
+       (values-list ,result-var))))

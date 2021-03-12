@@ -75,8 +75,8 @@
 (defun make-graph ()
   (let ((root (make-instance 'node)))
     (sb-sprof:map-traces
-     (lambda (thread time trace)
-       (declare (ignorable thread time))
+     (lambda (thread trace)
+       (declare (ignorable thread))
        (let ((current-node root))
          (sb-sprof:map-trace-samples
           (lambda (info pc-or-offset)

@@ -29,9 +29,8 @@ Then install the system:
 
 #+END_SRC
 
-Download a [[https://github.com/brendangregg/FlameGraph][FlameGraph chart generator]]. It is written in Perl. This
-system prepares a data in simple text format and this file should be
-processed by the *flamegraph.pl* to generate SVG file with the diagram.
+Download the [[https://github.com/brendangregg/FlameGraph][FlameGraph chart generator]]. It is written in Perl. This
+tool prepares data in a simple text format that can be processed by the *flamegraph.pl* script to generate an SVG diagram.
 
 Or you can upload results to the [[https://speedscope.app][Speedscope.app]] site and inspect it in
 the browser!

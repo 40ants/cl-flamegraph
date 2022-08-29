@@ -131,10 +131,11 @@
     `(let ((*frame-where-profiling-was-started*
              (sb-di:top-frame))
            (,result-var nil))
-       (sb-sprof:with-profiling (,@sb-sprof-opts)
-         (setf ,result-var
-               (multiple-value-list
-                (progn ,@body))))
+       (with-simple-restart (abort "Stop profiling and save graph")
+         (sb-sprof:with-profiling (,@sb-sprof-opts)
+           (setf ,result-var
+                 (multiple-value-list
+                  (progn ,@body)))))
        (alexandria:with-output-to-file (s ,filename :if-exists :supersede)
          (print-graph (make-graph)
                       :stream s))

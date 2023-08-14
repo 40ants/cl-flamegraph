@@ -15,7 +15,8 @@
   ((func :initarg :func
          :initform nil
          :type (or string
-                   sb-di::compiled-debug-fun)
+                   sb-di::compiled-debug-fun
+                   null)
          :accessor get-func)
    (counter :initform 0
             :type fixnum
@@ -71,14 +72,19 @@
 (defmethod get-name ((obj sb-kernel:code-component))
   "Some binary code")
 
+(defun aggregate-raw-data ()
+  ;; We need to actually run a report once to make the call graph
+  ;; available to map.
+  (sb-sprof:report :stream (make-broadcast-stream)))
 
 (defun make-graph ()
+  (aggregate-raw-data)
   (let ((root (make-instance 'node)))
     (sb-sprof:map-traces
      (lambda (thread trace)
        (declare (ignorable thread))
        (let ((current-node root))
-         (sb-sprof:map-trace-samples
+         (sb-sprof::map-trace-pc-locs
           (lambda (info pc-or-offset)
             (declare (ignorable pc-or-offset))
             (let ((node (search-or-add-child current-node
@@ -131,10 +137,11 @@
     `(let ((*frame-where-profiling-was-started*
              (sb-di:top-frame))
            (,result-var nil))
-       (sb-sprof:with-profiling (,@sb-sprof-opts)
-         (setf ,result-var
-               (multiple-value-list
-                (progn ,@body))))
+       (with-simple-restart (abort "Stop profiling and save graph")
+         (sb-sprof:with-profiling (,@sb-sprof-opts)
+           (setf ,result-var
+                 (multiple-value-list
+                  (progn ,@body)))))
        (alexandria:with-output-to-file (s ,filename :if-exists :supersede)
          (print-graph (make-graph)
                       :stream s))
